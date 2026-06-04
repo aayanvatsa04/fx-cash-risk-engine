@@ -1,0 +1,1209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FX VaR V2 · Cash & Exposures</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500&display=swap');
+
+  :root {
+    --bg:         #0d0f12;
+    --surface:    #13161b;
+    --surface2:   #1a1e25;
+    --border:     #252a33;
+    --border2:    #2e3440;
+    --text:       #e8eaf0;
+    --muted:      #6b7280;
+    --accent:     #4ade80;
+    --warn:       #fbbf24;
+    --danger:     #f87171;
+    --info:       #60a5fa;
+    --hedge:      #a78bfa;   /* purple — natural hedge benefit */
+    --mono:       'DM Mono', monospace;
+    --serif:      'Instrument Serif', serif;
+    --sans:       'DM Sans', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  .shell { max-width: 900px; margin: 0 auto; padding: 48px 24px 96px; }
+
+  /* ── HEADER ── */
+  header {
+    margin-bottom: 48px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 32px;
+  }
+  .header-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 10px;
+  }
+  header h1 {
+    font-family: var(--serif);
+    font-size: 36px;
+    font-weight: 400;
+    line-height: 1.15;
+  }
+  header h1 em { font-style: italic; color: var(--muted); }
+  .header-sub {
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 13px;
+    max-width: 560px;
+  }
+  .v2-badge {
+    display: inline-block;
+    background: rgba(167,139,250,0.12);
+    border: 1px solid rgba(167,139,250,0.3);
+    color: var(--hedge);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    padding: 2px 8px;
+    border-radius: 4px;
+    vertical-align: middle;
+    margin-left: 10px;
+  }
+
+  /* ── SECTION TITLES ── */
+  .section-title {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .section-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* ── CONFIG STRIP ── */
+  .config-strip {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 32px;
+    align-items: flex-end;
+    flex-wrap: wrap;
+  }
+  .config-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .config-field label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .config-field select {
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    outline: none;
+    height: 38px;
+    min-width: 120px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .config-field select:focus { border-color: var(--accent); }
+
+  /* ── TABLES (cash + exposures) ── */
+  .table-wrapper {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 16px;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 12px 16px;
+    text-align: left;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+    font-weight: 400;
+  }
+  tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background 0.1s;
+  }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: var(--surface2); }
+  tbody td { padding: 10px 16px; vertical-align: middle; }
+
+  .cell-input {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    outline: none;
+    width: 100%;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .cell-input:focus {
+    border-color: var(--border2);
+    background: var(--surface2);
+  }
+  .cell-input[type="date"] { cursor: pointer; }
+
+  .cell-select {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    outline: none;
+    cursor: pointer;
+    font-weight: 500;
+  }
+  .cell-select.direction-payable  { color: var(--danger); }
+  .cell-select.direction-recv     { color: var(--accent); }
+
+  .remove-btn {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: color 0.15s, background 0.15s;
+    line-height: 1;
+  }
+  .remove-btn:hover { color: var(--danger); background: rgba(248,113,113,0.08); }
+
+  /* ── ADD ROW BUTTONS ── */
+  .add-row-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: none;
+    border: 1px dashed var(--border2);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 10px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    width: 100%;
+    transition: color 0.15s, border-color 0.15s;
+    margin-bottom: 32px;
+  }
+  .add-row-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* ── CALCULATE ── */
+  .calc-btn {
+    background: var(--accent);
+    color: #000;
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    padding: 12px 32px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
+    display: block;
+  }
+  .calc-btn:hover   { opacity: 0.88; }
+  .calc-btn:active  { transform: scale(0.98); }
+  .calc-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .status-bar {
+    margin-top: 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    min-height: 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .spinner {
+    width: 12px; height: 12px;
+    border: 2px solid var(--border2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: none;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error-box {
+    padding: 12px 16px;
+    background: rgba(248,113,113,0.06);
+    border: 1px solid rgba(248,113,113,0.2);
+    border-radius: 8px;
+    color: var(--danger);
+    font-size: 12px;
+    margin-top: 16px;
+    display: none;
+  }
+
+  /* ── RESULTS ── */
+  #results {
+    margin-top: 48px;
+    display: none;
+    animation: fadeUp 0.4s ease both;
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── SPOT VaR CARD ── */
+  .var-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    margin-bottom: 16px;
+    position: relative;
+    overflow: hidden;
+  }
+  .var-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, var(--accent), transparent);
+  }
+  .var-card-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  .var-headline {
+    font-family: var(--serif);
+    font-size: 48px;
+    font-weight: 400;
+    color: var(--accent);
+    line-height: 1;
+  }
+  .var-headline .ccy { font-size: 22px; color: var(--muted); margin-right: 6px; }
+  .var-subtext {
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 13px;
+    max-width: 500px;
+  }
+  .var-subtext strong { color: var(--text); }
+
+  /* risk badge */
+  .risk-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-top: 14px;
+  }
+  .risk-badge.low    { background: rgba(74,222,128,0.1);  color: var(--accent); border: 1px solid rgba(74,222,128,0.2); }
+  .risk-badge.medium { background: rgba(251,191,36,0.1);  color: var(--warn);   border: 1px solid rgba(251,191,36,0.2); }
+  .risk-badge.high   { background: rgba(248,113,113,0.1); color: var(--danger); border: 1px solid rgba(248,113,113,0.2); }
+  .risk-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  /* warn box */
+  .warn-box {
+    padding: 12px 16px;
+    background: rgba(251,191,36,0.06);
+    border: 1px solid rgba(251,191,36,0.2);
+    border-radius: 8px;
+    color: var(--warn);
+    font-size: 12px;
+    margin-top: 12px;
+    line-height: 1.6;
+    display: none;
+  }
+
+  /* cash breakdown rows */
+  .breakdown-grid { display: grid; gap: 10px; }
+  .breakdown-row {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    display: grid;
+    grid-template-columns: 72px 1fr 1fr 1fr 150px;
+    align-items: center;
+    gap: 12px;
+    transition: border-color 0.15s;
+  }
+  .breakdown-row:hover { border-color: var(--border2); }
+  .bd-ccy   { font-family: var(--mono); font-size: 14px; font-weight: 500; color: var(--accent); }
+  .bd-label { font-family: var(--mono); font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 2px; }
+  .bd-value { font-family: var(--mono); font-size: 13px; color: var(--text); }
+  .bd-var   { font-family: var(--mono); font-size: 14px; color: var(--warn); font-weight: 500; }
+  .bd-bar-wrap { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 4px; }
+  .bd-bar-fill { height: 100%; background: var(--warn); border-radius: 2px; transition: width 0.6s ease; }
+
+  /* ── FORWARD BUCKETS ── */
+  .bucket-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 14px;
+  }
+  .bucket-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 18px;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+  }
+  .bucket-header-left { display: flex; align-items: center; gap: 12px; }
+  .bucket-num {
+    font-family: var(--mono);
+    font-size: 10px;
+    background: var(--border2);
+    color: var(--muted);
+    padding: 2px 7px;
+    border-radius: 4px;
+    letter-spacing: 0.06em;
+  }
+  .bucket-label {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+    font-weight: 500;
+  }
+  .bucket-t {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .bucket-total {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--warn);
+    font-weight: 500;
+  }
+  .bucket-total-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    text-align: right;
+    letter-spacing: 0.04em;
+  }
+
+  /* currency row within bucket */
+  .ccy-row {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .ccy-row:last-child { border-bottom: none; }
+  .ccy-row-top {
+    display: grid;
+    grid-template-columns: 72px 1fr 1fr 180px;
+    align-items: center;
+    gap: 12px;
+  }
+  .net-direction-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    font-weight: 500;
+  }
+  .net-direction-badge.long  { background: rgba(74,222,128,0.1);  color: var(--accent); }
+  .net-direction-badge.short { background: rgba(248,113,113,0.1); color: var(--danger); }
+  .net-direction-badge.flat  { background: rgba(107,114,128,0.1); color: var(--muted);  }
+
+  /* natural hedge saving strip */
+  .hedge-strip {
+    margin-top: 10px;
+    padding: 8px 12px;
+    background: rgba(167,139,250,0.07);
+    border: 1px solid rgba(167,139,250,0.18);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--hedge);
+  }
+  .hedge-strip .hedge-pct {
+    background: rgba(167,139,250,0.15);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 500;
+  }
+
+  /* attribution rows */
+  .attribution {
+    margin-top: 10px;
+    border-top: 1px dashed var(--border2);
+    padding-top: 10px;
+  }
+  .attr-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 6px;
+  }
+  .attr-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 4px 0;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .attr-arrow { font-size: 14px; width: 16px; flex-shrink: 0; }
+  .attr-arrow.recv { color: var(--accent); }
+  .attr-arrow.pay  { color: var(--danger); }
+  .attr-dir   { color: var(--muted); min-width: 80px; }
+  .attr-amt   { color: var(--text); min-width: 130px; }
+  .attr-date  { color: var(--muted); min-width: 80px; }
+  .attr-var   { color: var(--warn); margin-left: auto; }
+
+  /* no-combined-total notice */
+  .no-total-notice {
+    margin-top: 16px;
+    padding: 12px 16px;
+    background: rgba(96,165,250,0.05);
+    border: 1px solid rgba(96,165,250,0.15);
+    border-radius: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--info);
+    line-height: 1.6;
+  }
+
+  /* ── NET CURRENCY SUMMARY ── */
+  .net-summary-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .net-summary-table thead th {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 12px 16px;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+    text-align: right;
+    font-weight: 400;
+  }
+  .net-summary-table thead th:first-child { text-align: left; }
+  .net-summary-table tbody td {
+    padding: 11px 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    border-bottom: 1px solid var(--border);
+    text-align: right;
+  }
+  .net-summary-table tbody tr:last-child td { border-bottom: none; }
+  .net-summary-table tbody td:first-child { text-align: left; }
+  .net-val-positive { color: var(--accent); }
+  .net-val-negative { color: var(--danger); }
+  .net-val-flat     { color: var(--muted);  }
+
+  /* ── ASSUMPTIONS ── */
+  .assumptions {
+    margin-top: 24px;
+    padding: 16px 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.7;
+  }
+  .assumptions strong { color: var(--text); font-weight: 500; }
+
+  /* fetch errors */
+  .fetch-errors {
+    padding: 12px 16px;
+    background: rgba(248,113,113,0.06);
+    border: 1px solid rgba(248,113,113,0.2);
+    border-radius: 8px;
+    color: var(--danger);
+    font-size: 12px;
+    margin-bottom: 16px;
+    display: none;
+  }
+
+  @media (max-width: 640px) {
+    .breakdown-row { grid-template-columns: 60px 1fr 1fr; }
+    .ccy-row-top   { grid-template-columns: 60px 1fr 1fr; }
+    .var-headline  { font-size: 36px; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ── HEADER ── -->
+  <header>
+    <div class="header-label">Finmo · FX Risk Engine</div>
+    <h1>Cash &amp; Exposure <em>FX VaR</em> <span class="v2-badge">V2</span></h1>
+    <p class="header-sub">
+      Enter your cash balances and future payables/receivables. The engine
+      computes time-bucketed parametric VaR using historical FX data, with
+      natural hedging applied within each settlement window.
+    </p>
+  </header>
+
+  <!-- ── CONFIG ── -->
+  <div class="section-title">Configuration</div>
+  <div class="config-strip">
+    <div class="config-field">
+      <label>Base Currency</label>
+      <select id="baseCcy">
+        <option value="SGD" selected>SGD — Singapore Dollar</option>
+        <option value="USD">USD — US Dollar</option>
+        <option value="EUR">EUR — Euro</option>
+        <option value="GBP">GBP — British Pound</option>
+        <option value="JPY">JPY — Japanese Yen</option>
+        <option value="CHF">CHF — Swiss Franc</option>
+        <option value="AUD">AUD — Australian Dollar</option>
+        <option value="CAD">CAD — Canadian Dollar</option>
+        <option value="HKD">HKD — Hong Kong Dollar</option>
+        <option value="MYR">MYR — Malaysian Ringgit</option>
+        <option value="THB">THB — Thai Baht</option>
+        <option value="IDR">IDR — Indonesian Rupiah</option>
+        <option value="INR">INR — Indian Rupee</option>
+        <option value="AED">AED — UAE Dirham</option>
+        <option value="TRY">TRY — Turkish Lira (testing)</option>
+      </select>
+    </div>
+    <div class="config-field">
+      <label>Confidence</label>
+      <select id="confidence">
+        <option value="0.95" selected>95%</option>
+        <option value="0.99">99%</option>
+        <option value="0.90">90%</option>
+      </select>
+    </div>
+    <div class="config-field">
+      <label>Lookback</label>
+      <select id="lookback">
+        <option value="1y" selected>1 year</option>
+        <option value="2y">2 years</option>
+        <option value="6mo">6 months</option>
+      </select>
+    </div>
+    <div class="config-field">
+      <label>Cash VaR Horizon</label>
+      <select id="cashHorizon">
+        <option value="1" selected>1 day</option>
+        <option value="5">5 days (1 week)</option>
+        <option value="21">21 days (1 month)</option>
+        <option value="30">30 days</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- ── CASH POSITIONS ── -->
+  <div class="section-title">Cash Positions</div>
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th>Currency</th>
+          <th>Balance</th>
+          <th style="width:48px"></th>
+        </tr>
+      </thead>
+      <tbody id="cashBody"></tbody>
+    </table>
+  </div>
+  <button class="add-row-btn" onclick="addCashRow()">
+    <span style="font-size:16px">+</span> Add cash position
+  </button>
+
+  <!-- ── FUTURE EXPOSURES ── -->
+  <div class="section-title">Future Exposures</div>
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th>Currency</th>
+          <th>Amount</th>
+          <th>Settlement Date</th>
+          <th>Direction</th>
+          <th style="width:48px"></th>
+        </tr>
+      </thead>
+      <tbody id="expBody"></tbody>
+    </table>
+  </div>
+  <button class="add-row-btn" onclick="addExpRow()">
+    <span style="font-size:16px">+</span> Add future exposure
+  </button>
+
+  <!-- ── CALCULATE ── -->
+  <button class="calc-btn" id="calcBtn" onclick="calculate()">Calculate VaR</button>
+  <div class="status-bar">
+    <div class="spinner" id="spinner"></div>
+    <span id="statusText"></span>
+  </div>
+  <div class="error-box" id="errorBox"></div>
+
+  <!-- ── RESULTS ── -->
+  <div id="results">
+
+    <!-- Partial fetch errors -->
+    <div class="fetch-errors" id="fetchErrors"></div>
+
+    <!-- ── LAYER 1a: SPOT RISK ── -->
+    <div class="section-title" style="margin-top:0" id="spotSection">
+      Layer 1a — Spot Risk
+    </div>
+    <div class="var-card" id="spotCard" style="display:none">
+      <div class="var-card-label">
+        <span id="rCashHorizon"></span>-Day FX Value at Risk · Cash Positions ·
+        <span id="rConfidence"></span> Confidence
+      </div>
+      <div class="var-headline">
+        <span class="ccy" id="rBaseCcy"></span><span id="rSpotVaR"></span>
+      </div>
+      <p class="var-subtext" id="rSpotInterp"></p>
+      <div class="risk-badge" id="rBadge">
+        <div class="risk-dot"></div>
+        <span id="rBadgeText"></span>
+      </div>
+      <div class="warn-box" id="rWarnBox"></div>
+    </div>
+    <div class="breakdown-grid" id="spotBreakdown"></div>
+
+    <!-- ── LAYER 1b & 2: FORWARD BUCKETS ── -->
+    <div class="section-title" style="margin-top:32px" id="fwdSection">
+      Layer 1b &amp; 2 — Forward Risk
+    </div>
+    <div id="bucketContainer"></div>
+    <div class="no-total-notice" id="noTotalNotice" style="display:none">
+      ⓘ  No combined forward total is shown. Each bucket uses a different
+      time horizon T — Bucket 2 uses T=42 days, Bucket 3 uses T=95 days, etc.
+      Adding them together would conflate risks over different time windows
+      and produce a misleading single number. Each bucket VaR is meaningful
+      and actionable within its own settlement window.
+    </div>
+
+    <!-- ── LAYER 3: NET CURRENCY SUMMARY ── -->
+    <div class="section-title" style="margin-top:32px" id="netSection">
+      Layer 3 — Net Currency Summary
+    </div>
+    <div style="margin-bottom:8px; font-family:var(--mono); font-size:11px; color:var(--muted);">
+      Informational only. Combines cash + receivables − payables per currency.
+      Not used for VaR — different horizons make netting for risk purposes ambiguous.
+    </div>
+    <table class="net-summary-table" id="netSummaryTable">
+      <thead>
+        <tr>
+          <th>Currency</th>
+          <th>Cash</th>
+          <th>Receivables</th>
+          <th>Payables</th>
+          <th>Net Position</th>
+          <th>Direction</th>
+        </tr>
+      </thead>
+      <tbody id="netSummaryBody"></tbody>
+    </table>
+
+    <!-- ── ASSUMPTIONS ── -->
+    <div class="assumptions">
+      <strong>Model — Full Parametric (Delta-Normal) VaR, V2</strong><br><br>
+      <strong>Spot Risk:</strong> Cash positions use a user-specified horizon T.
+      σ_T = σ_annual × √(T/252); μ_T = μ_daily × T.
+      VaR = E × (Z_α × σ_T − μ_T) for long (cash/receivable),
+      VaR = E × (Z_α × σ_T + μ_T) for short (payable).<br><br>
+      <strong>Forward Risk:</strong> Each exposure's horizon T = trading days from
+      today to settlement date. Exposures are grouped into time buckets (0–1mo,
+      1–3mo, 3–6mo, 6–12mo, >12mo) and netted within each bucket/currency.
+      VaR is computed on the net notional using the bucket midpoint T.<br><br>
+      <strong>Natural Hedging Benefit:</strong> Within each bucket/currency group,
+      gross VaR (sum of standalone VaRs at bucket T) minus net VaR (VaR on net
+      notional). Both computed at the same bucket T so the difference is purely
+      from netting. A positive benefit means offsetting positions reduced risk.<br><br>
+      <strong>Limitations:</strong> Normality assumption; historical (backward-looking)
+      volatility; simple sum across currencies within each bucket (assumes perfect
+      correlation); natural hedging only within forward buckets (cash vs forward
+      netting requires treasury policy assumptions and is left for V2.3+).
+      Monte Carlo with Student's t for fat tails planned for V3.
+    </div>
+
+  </div><!-- /#results -->
+
+</div><!-- /.shell -->
+
+<script>
+// =============================================================================
+// SUPPORTED CURRENCIES
+// =============================================================================
+const CURRENCIES = [
+  'USD','SGD','EUR','GBP','JPY','CHF','AUD','CAD','NZD','HKD',
+  'MYR','THB','IDR','PHP','INR','CNH','KRW','TWD','AED','SAR',
+  'TRY','ARS','BRL','ZAR','MXN'
+];
+
+// =============================================================================
+// TABLE ROW MANAGEMENT — CASH POSITIONS
+// =============================================================================
+let cashId = 0;
+
+function addCashRow(ccy = '', balance = '') {
+  const tbody = document.getElementById('cashBody');
+  const id    = cashId++;
+  const opts  = CURRENCIES
+    .map(c => `<option value="${c}" ${c === ccy ? 'selected' : ''}>${c}</option>`)
+    .join('');
+  const tr = document.createElement('tr');
+  tr.id = `cash-${id}`;
+  tr.innerHTML = `
+    <td><select class="cell-select" id="cashCcy-${id}">${opts}</select></td>
+    <td><input class="cell-input" id="cashBal-${id}" type="number"
+         min="0" step="any" placeholder="e.g. 2000000" value="${balance}"></td>
+    <td><button class="remove-btn" onclick="removeCash(${id})">×</button></td>
+  `;
+  tbody.appendChild(tr);
+}
+
+function removeCash(id) {
+  document.getElementById(`cash-${id}`)?.remove();
+}
+
+// =============================================================================
+// TABLE ROW MANAGEMENT — FUTURE EXPOSURES
+// =============================================================================
+let expId = 0;
+
+function addExpRow(ccy = '', amount = '', date = '', dir = 'payable') {
+  const tbody = document.getElementById('expBody');
+  const id    = expId++;
+  const opts  = CURRENCIES
+    .map(c => `<option value="${c}" ${c === ccy ? 'selected' : ''}>${c}</option>`)
+    .join('');
+  const tr = document.createElement('tr');
+  tr.id = `exp-${id}`;
+  tr.innerHTML = `
+    <td><select class="cell-select" id="expCcy-${id}">${opts}</select></td>
+    <td><input class="cell-input" id="expAmt-${id}" type="number"
+         min="0" step="any" placeholder="e.g. 5000000" value="${amount}"></td>
+    <td><input class="cell-input" id="expDate-${id}" type="date"
+         value="${date}" style="min-width:130px"></td>
+    <td>
+      <select class="cell-select direction-${dir}" id="expDir-${id}"
+              onchange="updateDirStyle(this)">
+        <option value="payable"    ${dir==='payable'    ? 'selected' : ''}>Payable</option>
+        <option value="receivable" ${dir==='receivable' ? 'selected' : ''}>Receivable</option>
+      </select>
+    </td>
+    <td><button class="remove-btn" onclick="removeExp(${expId-1})">×</button></td>
+  `;
+  tbody.appendChild(tr);
+}
+
+function removeExp(id) {
+  document.getElementById(`exp-${id}`)?.remove();
+}
+
+// Update direction dropdown colour when changed
+function updateDirStyle(sel) {
+  sel.className = `cell-select direction-${sel.value}`;
+}
+
+// Seed defaults
+addCashRow('USD',  '2000000');
+addCashRow('MYR',  '5000000');
+addCashRow('AUD',  '1000000');
+addExpRow('USD',  '2000000', '2026-08-15', 'receivable');
+addExpRow('USD',  '1000000', '2026-08-25', 'payable');
+addExpRow('MYR',  '8000000', '2026-08-20', 'payable');
+addExpRow('USD',  '3000000', '2026-10-30', 'payable');
+addExpRow('EUR',  '1000000', '2027-01-15', 'receivable');
+
+// =============================================================================
+// CALCULATE — collect inputs, POST to Flask, render results
+// =============================================================================
+async function calculate() {
+  const baseCcy     = document.getElementById('baseCcy').value;
+  const confidence  = parseFloat(document.getElementById('confidence').value);
+  const period      = document.getElementById('lookback').value;
+  const cashHorizon = parseInt(document.getElementById('cashHorizon').value, 10);
+
+  // Collect cash positions
+  const cashPositions = [];
+  for (const tr of document.getElementById('cashBody').querySelectorAll('tr')) {
+    const id  = tr.id.replace('cash-', '');
+    const ccy = document.getElementById(`cashCcy-${id}`)?.value;
+    const bal = parseFloat(document.getElementById(`cashBal-${id}`)?.value);
+    if (!ccy || isNaN(bal) || bal <= 0) continue;
+    if (ccy === baseCcy) continue;
+    cashPositions.push({ currency: ccy, balance: bal });
+  }
+
+  // Collect future exposures
+  const exposures = [];
+  for (const tr of document.getElementById('expBody').querySelectorAll('tr')) {
+    const id   = tr.id.replace('exp-', '');
+    const ccy  = document.getElementById(`expCcy-${id}`)?.value;
+    const amt  = parseFloat(document.getElementById(`expAmt-${id}`)?.value);
+    const dt   = document.getElementById(`expDate-${id}`)?.value;
+    const dir  = document.getElementById(`expDir-${id}`)?.value;
+    if (!ccy || isNaN(amt) || amt <= 0 || !dt) continue;
+    if (ccy === baseCcy) continue;
+    exposures.push({ currency: ccy, amount: amt, settlement_date: dt, direction: dir });
+  }
+
+  if (!cashPositions.length && !exposures.length) {
+    showError('Please add at least one cash position or future exposure.');
+    return;
+  }
+
+  setLoading(true);
+  setStatus('Running V2 engine — fetching market data and computing VaR…');
+  hideError();
+  document.getElementById('results').style.display = 'none';
+
+  try {
+    const resp = await fetch('/calculate', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        base_currency:  baseCcy,
+        confidence,
+        period,
+        cash_horizon:   cashHorizon,
+        cash_positions: cashPositions,
+        exposures,
+      }),
+    });
+    const result = await resp.json();
+    if (!resp.ok || result.error) throw new Error(result.error || `HTTP ${resp.status}`);
+    setLoading(false);
+    setStatus('');
+    renderResults(result);
+  } catch (err) {
+    setLoading(false);
+    setStatus('');
+    showError(`Error: ${err.message}`);
+  }
+}
+
+// =============================================================================
+// RENDER RESULTS
+// =============================================================================
+function renderResults(data) {
+  const { base_ccy, confidence, cash_horizon,
+          spot_risk, forward_net, net_currency_summary } = data;
+
+  // Collect all errors
+  const allErrors = [
+    ...(spot_risk?.errors || []).map(e => `Cash ${e.currency}: ${e.reason}`),
+    ...(data.forward_gross?.errors || []).map(e =>
+      `${e.currency} (${e.settlement_date}): ${e.reason}`),
+    ...(forward_net?.errors || []).map(e =>
+      `${e.currency || ''} (${e.settlement_date || ''}): ${e.reason || ''}`),
+  ];
+  const fetchErrBox = document.getElementById('fetchErrors');
+  if (allErrors.length) {
+    fetchErrBox.style.display = 'block';
+    fetchErrBox.innerHTML = '⚠ The following could not be fetched and are excluded:<br>'
+      + allErrors.join('<br>');
+  } else {
+    fetchErrBox.style.display = 'none';
+  }
+
+  // ── Layer 1a: Spot risk ──────────────────────────────────────────────────
+  const hasSpot = spot_risk?.positions?.length > 0;
+  document.getElementById('spotCard').style.display = hasSpot ? 'block' : 'none';
+
+  if (hasSpot) {
+    document.getElementById('rCashHorizon').textContent = cash_horizon;
+    document.getElementById('rConfidence').textContent  = `${Math.round(confidence * 100)}%`;
+    document.getElementById('rBaseCcy').textContent     = base_ccy + ' ';
+    document.getElementById('rSpotVaR').textContent     = fmt(spot_risk.total_var);
+
+    const totalExp = spot_risk.positions.reduce((s, p) => s + p.exposure_base, 0);
+    const pct = totalExp > 0 ? spot_risk.total_var / totalExp : 0;
+    document.getElementById('rSpotInterp').innerHTML =
+      `<strong>${Math.round(confidence*100)}%</strong> chance of losing no more than
+       <strong>${base_ccy} ${fmt(spot_risk.total_var)}</strong> in
+       <strong>${cash_horizon}</strong> trading day(s).
+       Represents <strong>${(pct*100).toFixed(2)}%</strong> of
+       ${base_ccy}-equivalent cash exposure.`;
+
+    // Risk badge
+    const sqrtT  = Math.sqrt(cash_horizon);
+    const badge  = document.getElementById('rBadge');
+    const btext  = document.getElementById('rBadgeText');
+    badge.className = 'risk-badge';
+    if      (pct < 0.005 * sqrtT) { badge.classList.add('low');    btext.textContent = 'Low Risk';    }
+    else if (pct < 0.015 * sqrtT) { badge.classList.add('medium'); btext.textContent = 'Medium Risk'; }
+    else                           { badge.classList.add('high');   btext.textContent = 'High Risk';   }
+
+    // Warn box
+    const warnBox  = document.getElementById('rWarnBox');
+    const anyDrift = spot_risk.positions.some(p => p.drift_warning);
+    const anyFloor = spot_risk.positions.some(p => p.var_was_floored);
+    if (anyDrift || anyFloor) {
+      warnBox.style.display = 'block';
+      const parts = [];
+      if (anyDrift) parts.push('⚠ One or more pairs have annualised drift > ±10%. Full formula (μ ≠ 0) applied. Normality may understate tail risk for crashing currencies.');
+      if (anyFloor) parts.push('⚠ One or more positions had negative raw VaR (floored to 0). Drift in your favour exceeds downside vol at this horizon. Does NOT mean zero risk.');
+      warnBox.textContent = parts.join(' ');
+    } else {
+      warnBox.style.display = 'none';
+    }
+
+    // Per-position breakdown
+    const grid = document.getElementById('spotBreakdown');
+    grid.innerHTML = '';
+    for (const p of spot_risk.positions) {
+      const share = spot_risk.total_var > 0 ? (p.var / spot_risk.total_var * 100) : 0;
+      const driftFlag = p.drift_warning
+        ? `<span style="color:var(--warn);font-size:10px"> ⚠ drift ${(p.annualised_mean*100).toFixed(1)}%/yr</span>`
+        : `<span style="color:var(--muted);font-size:10px"> drift ${(p.annualised_mean*100).toFixed(2)}%/yr</span>`;
+      const crossNote = p.used_cross_rate
+        ? `<span style="color:var(--muted);font-size:10px;display:block">via USD cross-rate</span>` : '';
+      const floorNote = p.var_was_floored
+        ? `<span style="color:var(--warn);font-size:10px;display:block">Raw VaR: ${base_ccy} -${fmt(Math.abs(p.var_raw))} (floored)</span>` : '';
+      const row = document.createElement('div');
+      row.className = 'breakdown-row';
+      row.innerHTML = `
+        <div class="bd-ccy">${p.currency}</div>
+        <div><div class="bd-label">Balance</div>
+             <div class="bd-value">${p.currency} ${fmtC(p.balance)}</div></div>
+        <div><div class="bd-label">Spot Rate</div>
+             <div class="bd-value">${p.spot_rate.toFixed(4)}${crossNote}</div></div>
+        <div><div class="bd-label">Ann. Volatility</div>
+             <div class="bd-value">${(p.annualised_vol*100).toFixed(2)}%${driftFlag}</div></div>
+        <div><div class="bd-label">${cash_horizon}-Day VaR (${base_ccy})</div>
+             <div class="bd-var">${base_ccy} ${fmt(p.var)}</div>
+             <div class="bd-bar-wrap"><div class="bd-bar-fill" style="width:${share.toFixed(1)}%"></div></div>
+             ${floorNote}</div>
+      `;
+      grid.appendChild(row);
+    }
+  }
+
+  // ── Layer 1b & 2: Forward buckets ────────────────────────────────────────
+  const container = document.getElementById('bucketContainer');
+  container.innerHTML = '';
+
+  const hasBuckets = forward_net?.buckets?.length > 0;
+  document.getElementById('noTotalNotice').style.display = hasBuckets ? 'block' : 'none';
+
+  if (hasBuckets) {
+    for (const bucket of forward_net.buckets) {
+      const card = document.createElement('div');
+      card.className = 'bucket-card';
+
+      // Bucket header
+      card.innerHTML = `
+        <div class="bucket-header">
+          <div class="bucket-header-left">
+            <span class="bucket-num">B${bucket.bucket_num}</span>
+            <span class="bucket-label">${bucket.bucket_label}</span>
+            <span class="bucket-t">T = ${bucket.midpoint_days} trading days</span>
+          </div>
+          <div style="text-align:right">
+            <div class="bucket-total-label">Bucket VaR</div>
+            <div class="bucket-total">${base_ccy} ${fmt(bucket.bucket_var)}</div>
+          </div>
+        </div>
+      `;
+
+      // Per-currency rows
+      for (const ccy of bucket.currencies) {
+        const dirClass = ccy.net_direction === 'long' ? 'long'
+                       : ccy.net_direction === 'short' ? 'short' : 'flat';
+        const dirLabel = ccy.net_direction === 'long'  ? 'NET LONG'
+                       : ccy.net_direction === 'short' ? 'NET SHORT' : 'FLAT';
+        const driftStr = ccy.drift_warning
+          ? `<span style="color:var(--warn);font-size:10px"> ⚠ drift ${(ccy.annualised_mean*100).toFixed(1)}%/yr</span>` : '';
+        const crossStr = ccy.used_cross_rate
+          ? `<span style="color:var(--muted);font-size:10px"> [cross-rate]</span>` : '';
+        const floorStr = ccy.var_was_floored
+          ? `<span style="color:var(--warn);font-size:10px"> [floored from ${base_ccy} -${fmt(Math.abs(ccy.net_var_raw))}]</span>` : '';
+
+        // Natural hedge strip
+        let hedgeHtml = '';
+        if (ccy.hedge_benefit > 0.01) {
+          const pct = ccy.gross_var_at_bucket_t > 0
+            ? (ccy.hedge_benefit / ccy.gross_var_at_bucket_t * 100).toFixed(1) : '0.0';
+          hedgeHtml = `
+            <div class="hedge-strip">
+              ⬡ Natural hedge saved
+              <strong>${base_ccy} ${fmt(ccy.hedge_benefit)}</strong>
+              <span class="hedge-pct">${pct}%</span>
+              of gross ${base_ccy} ${fmt(ccy.gross_var_at_bucket_t)}
+            </div>`;
+        }
+
+        // Attribution (when multiple positions or flat)
+        let attrHtml = '';
+        if (ccy.positions.length > 1 || ccy.net_direction === 'flat') {
+          const rows = ccy.positions.map(pos => {
+            const isRecv = pos.direction === 'receivable';
+            return `
+              <div class="attr-row">
+                <span class="attr-arrow ${isRecv ? 'recv' : 'pay'}">${isRecv ? '→' : '←'}</span>
+                <span class="attr-dir">${pos.direction}</span>
+                <span class="attr-amt">${pos.currency} ${fmtC(pos.amount)}</span>
+                <span class="attr-date">${pos.settlement_date}</span>
+                <span class="attr-var">${base_ccy} ${fmt(pos.standalone_var_at_bucket_t)}</span>
+              </div>`;
+          }).join('');
+          attrHtml = `
+            <div class="attribution">
+              <div class="attr-label">Attribution at T=${bucket.midpoint_days} days</div>
+              ${rows}
+            </div>`;
+        }
+
+        const ccyRow = document.createElement('div');
+        ccyRow.className = 'ccy-row';
+        ccyRow.innerHTML = `
+          <div class="ccy-row-top">
+            <div class="bd-ccy">${ccy.currency}</div>
+            <div>
+              <span class="net-direction-badge ${dirClass}">${dirLabel}</span>
+              <div class="bd-value" style="margin-top:4px">
+                ${ccy.currency} ${fmtC(Math.abs(ccy.net_notional_foreign))}${crossStr}
+              </div>
+            </div>
+            <div>
+              <div class="bd-label">Spot · σ_annual</div>
+              <div class="bd-value">${ccy.spot_rate.toFixed(4)}  
+                ${(ccy.annualised_vol*100).toFixed(2)}%${driftStr}
+              </div>
+            </div>
+            <div>
+              <div class="bd-label">Net VaR (${base_ccy})</div>
+              <div class="bd-var">${base_ccy} ${fmt(ccy.net_var)}${floorStr}</div>
+            </div>
+          </div>
+          ${hedgeHtml}
+          ${attrHtml}
+        `;
+        card.appendChild(ccyRow);
+      }
+
+      container.appendChild(card);
+    }
+  }
+
+  // ── Layer 3: Net currency summary ────────────────────────────────────────
+  const tbody = document.getElementById('netSummaryBody');
+  tbody.innerHTML = '';
+
+  for (const row of (net_currency_summary || [])) {
+    const dirClass = row.net_direction === 'long'  ? 'net-val-positive'
+                   : row.net_direction === 'short' ? 'net-val-negative'
+                   :                                  'net-val-flat';
+    const dirLabel = row.net_direction === 'long'  ? '▲ Long'
+                   : row.net_direction === 'short' ? '▼ Short'
+                   :                                  '— Flat';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td style="font-family:var(--mono);color:var(--accent);font-weight:500">
+        ${row.currency}
+      </td>
+      <td>${row.cash_base > 0 ? `+${base_ccy} ${fmtC(row.cash_base)}` : '—'}</td>
+      <td>${row.receivables_base > 0 ? `+${base_ccy} ${fmtC(row.receivables_base)}` : '—'}</td>
+      <td>${row.payables_base > 0 ? `−${base_ccy} ${fmtC(row.payables_base)}` : '—'}</td>
+      <td class="${dirClass}">${base_ccy} ${fmt(row.net_base)}</td>
+      <td class="${dirClass}" style="font-family:var(--mono);font-size:11px">
+        ${dirLabel}
+      </td>
+    `;
+    tbody.appendChild(tr);
+  }
+
+  document.getElementById('results').style.display = 'block';
+}
+
+// =============================================================================
+// UI HELPERS
+// =============================================================================
+function setLoading(on) {
+  document.getElementById('spinner').style.display  = on ? 'block' : 'none';
+  document.getElementById('calcBtn').disabled       = on;
+}
+function setStatus(msg) {
+  document.getElementById('statusText').textContent = msg;
+}
+function showError(msg) {
+  const el = document.getElementById('errorBox');
+  el.textContent = msg; el.style.display = 'block';
+}
+function hideError() {
+  document.getElementById('errorBox').style.display = 'none';
+}
+function fmt(n) {
+  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtC(n) {
+  if (n >= 1e9) return (n/1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n/1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return n.toFixed(0);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,48 @@
+# .gitignore
+# Tells Git which files and folders to NEVER upload to GitHub.
+# These are either generated automatically (no need to store them),
+# environment-specific (different on every machine), or sensitive
+# (API keys, passwords — never put these on GitHub).
+
+# ── Python cache files ──────────────────────────────────────────
+# Python creates these automatically when it runs your code.
+# They speed up imports locally but are machine-specific.
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── Virtual environment ─────────────────────────────────────────
+# Your .venv folder contains all installed packages for your machine.
+# Railway installs its own packages from requirements.txt — it doesn't
+# need yours. Uploading .venv would add hundreds of MB to your repo.
+.venv/
+venv/
+env/
+ENV/
+
+# ── Environment variables ───────────────────────────────────────
+# If you ever create a .env file with API keys or secrets, this
+# line ensures they never accidentally get pushed to GitHub.
+.env
+.env.*
+
+# ── macOS system files ──────────────────────────────────────────
+# macOS creates .DS_Store files in every folder automatically.
+# They're invisible but clutter your repo with junk.
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# ── Test output and logs ────────────────────────────────────────
+*.log
+*.pot
+
+# ── Distribution / packaging ────────────────────────────────────
+# Generated if you ever try to package this as a Python library.
+dist/
+build/
+*.egg-info/

@@ -1,0 +1,11 @@
+# requirements.txt
+# Lists every Python package Railway needs to install before running the app.
+# Railway reads this file automatically — you never need to run pip install manually
+# on the server. Just keep this file up to date and Railway handles the rest.
+
+flask       # web framework — handles HTTP requests and routes
+gunicorn    # production WSGI server — replaces Flask's dev server on Railway
+yfinance    # fetches historical FX data from Yahoo Finance
+numpy       # numerical arrays and matrix operations
+pandas      # data manipulation (DataFrames, time series)
+scipy       # statistical functions (norm.ppf for the VaR Z-score)
