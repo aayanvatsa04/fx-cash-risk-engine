@@ -496,3 +496,155 @@ def calculate_portfolio_var(
         'positions':  position_results,
         'errors':     errors,
     }
+
+
+# =============================================================================
+# COVARIANCE MATRIX UTILITIES — V2.2
+# =============================================================================
+
+def build_correlation_matrix(
+    returns_dict: dict[str, pd.Series]
+) -> tuple[np.ndarray, list[str]]:
+    """
+    Builds a Pearson correlation matrix from a dict of daily return series.
+
+    The series are aligned to a common date range (inner join) before computing
+    correlations, so minor differences in trading calendars across markets are
+    handled correctly.
+
+    The resulting matrix is projected onto the nearest positive semi-definite (PSD)
+    matrix via eigenvalue clamping. This is a standard numerical safety step —
+    in theory a correlation matrix is always PSD, but floating point arithmetic
+    and short/misaligned series can produce tiny negative eigenvalues that would
+    break the portfolio variance calculation.
+
+    Args:
+        returns_dict: Dict mapping currency ISO code → daily returns pd.Series.
+                      Each Series should be daily percentage returns (from pct_change).
+
+    Returns:
+        (corr_matrix, ccy_order) where:
+            corr_matrix: np.ndarray of shape (n, n), the correlation matrix.
+            ccy_order:   list[str] of currency codes in the order corresponding
+                         to the matrix rows/columns. Always sorted alphabetically
+                         for deterministic output.
+
+    Notes:
+        - If only one currency is provided, returns [[1.0]] and [ccy].
+        - If fewer than 30 aligned data points exist, returns identity matrix
+          (zero correlation assumption — conservative fallback).
+    """
+    ccys = sorted(returns_dict.keys())   # alphabetical → deterministic ordering
+    n = len(ccys)
+
+    if n == 1:
+        return np.array([[1.0]]), ccys
+
+    # Align all series on dates: concat produces NaN where dates don't overlap,
+    # dropna keeps only rows where ALL currencies have data (inner join on dates).
+    aligned = pd.concat(
+        [returns_dict[c].rename(c) for c in ccys], axis=1
+    ).dropna()
+
+    if len(aligned) < 30:
+        # Insufficient overlapping data → fall back to identity (no correlation).
+        # This is conservative: it produces the same result as the simple-sum VaR.
+        return np.eye(n), ccys
+
+    corr = aligned.corr().values.astype(float)
+
+    # --- PSD projection via eigenvalue clamping ---
+    # Replace any negative eigenvalues (numerical noise) with 0 and re-normalise
+    # the diagonal back to 1 so we still have a valid correlation matrix.
+    eigvals, eigvecs = np.linalg.eigh(corr)
+    eigvals_clamped  = np.maximum(eigvals, 0.0)
+    corr_psd = eigvecs @ np.diag(eigvals_clamped) @ eigvecs.T
+
+    # Re-normalise: divide by outer product of sqrt(diag) to restore 1s on diagonal
+    d = np.sqrt(np.diag(corr_psd))
+    d[d == 0] = 1.0   # guard against zero diagonal (degenerate case)
+    corr_psd = corr_psd / np.outer(d, d)
+
+    return corr_psd, ccys
+
+
+def calculate_portfolio_var_cov(
+    signed_exposures_base: list[float],
+    ann_vols:              list[float],
+    daily_means:           list[float],
+    correlation_matrix:    np.ndarray,
+    confidence_level:      float,
+    days:                  int,
+) -> tuple[float, float]:
+    """
+    Computes portfolio VaR using the delta-normal covariance method.
+
+    This replaces the simple-sum approach in calculate_portfolio_var, which
+    assumed perfect positive correlation between all currency pairs (maximum
+    possible VaR). The covariance method uses actual historical correlations
+    and correctly captures diversification benefit when currencies are
+    imperfectly correlated.
+
+    Formula:
+        Portfolio VaR = Z × √(s^T Σ_T s) − Σᵢ(sᵢ × μᵢ × T)
+
+    where:
+        sᵢ        = signed exposure in base currency
+                    (+positive = long = fear FCY depreciation)
+                    (-negative = short = fear FCY appreciation)
+        Σ_T[i,j]  = ρ[i,j] × σ_T_i × σ_T_j
+        σ_T_i     = σ_annual_i × √(T/252)   [vol scaled to horizon T]
+        μᵢ × T    = drift scaled linearly to horizon T
+
+    The signed exposure convention handles direction automatically — no separate
+    'long'/'short' parameter needed. Both long and short positions contribute to
+    portfolio risk through the quadratic form s^T Σ_T s, but their drift terms
+    partially offset each other when positions are in opposite directions.
+
+    Why this is better than the simple sum:
+        Simple sum:  assumes ρ = 1 for all pairs → overstates risk.
+        Covariance:  uses actual ρ, typically 0 < ρ < 1 for unrelated CCYs,
+                     can be negative for inverse relationships.
+        Benefit:     simple_sum_var − cov_var ≥ 0 (diversification benefit).
+
+    Args:
+        signed_exposures_base: List of signed exposures in base currency.
+                               Must be in the same order as correlation_matrix rows.
+        ann_vols:              Annualised volatility per currency (same order).
+        daily_means:           Daily mean return per currency (same order).
+        correlation_matrix:    PSD correlation matrix from build_correlation_matrix.
+        confidence_level:      VaR confidence (e.g. 0.95).
+        days:                  Time horizon in trading days.
+
+    Returns:
+        (var_floored, var_raw) — same convention as calculate_parametric_var.
+        var_floored is clamped at 0; var_raw can be negative if drift dominates.
+    """
+    n = len(signed_exposures_base)
+    if n == 0:
+        return 0.0, 0.0
+
+    z = norm.ppf(confidence_level)
+    s = np.array(signed_exposures_base, dtype=float)
+
+    # Scale annualised vols to horizon T: σ_T = σ_annual × √(T/252)
+    sigma_T = np.array(ann_vols, dtype=float) * np.sqrt(days / TRADING_DAYS_PER_YEAR)
+
+    # Covariance matrix at horizon T: Σ_T[i,j] = ρ[i,j] × σ_T_i × σ_T_j
+    cov_T = correlation_matrix * np.outer(sigma_T, sigma_T)
+
+    # Portfolio variance: s^T Σ_T s
+    # For a PSD Σ_T this is always ≥ 0; clamp to guard against floating point.
+    portfolio_variance = float(s @ cov_T @ s)
+    portfolio_vol_T    = np.sqrt(max(portfolio_variance, 0.0))
+
+    # Portfolio drift: Σᵢ(sᵢ × μᵢ × T)
+    # Note: signed sᵢ means long drift helps (reduces VaR) and short drift for
+    # an appreciating FCY hurts — all handled correctly by the sign convention.
+    mu_T = np.array(daily_means, dtype=float) * days
+    portfolio_drift_T = float(s @ mu_T)
+
+    # Portfolio VaR
+    raw_var = z * portfolio_vol_T - portfolio_drift_T
+
+    return max(raw_var, 0.0), raw_var

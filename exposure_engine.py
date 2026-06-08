@@ -18,64 +18,59 @@ This means:
   - To add new exposure types or change bucketing logic: only touch this file.
   - The Flask app and HTML frontend are completely insulated from both.
 
-=== WHAT THIS MODULE ADDS OVER V1 ===
+=== THREE-SECTION OUTPUT ===
 
-V1 (var_engine.py) only handles cash positions:
-  - All positions are LONG (holder fears FCY depreciation)
-  - User specifies the VaR horizon T (e.g. 30 days)
-  - VaR computed independently per position, summed
+SECTION 1 — Spot book risk (standalone, T = cash_horizon):
+  VaR on current cash holdings at the user-specified horizon T.
+  Each position computed independently using calculate_portfolio_var from V1.
+  V2.2 addition: covariance-adjusted total + diversification benefit across
+  currencies, using the historical correlation matrix of their return series.
+  Completely separate from forward exposures — this is the daily cash book.
 
-V2 (this module) adds future exposures on top:
-  - Positions can be LONG (receivable) or SHORT (payable)
-  - Each exposure has a settlement date — VaR horizon T = trading days to settlement
-  - Positions are grouped into time buckets and NETTED within each bucket/currency
-    before VaR is computed → captures natural hedging benefit
+SECTION 2 — Unified bucketed risk (cash + forwards, covariance-adjusted):
+  Cash positions are converted to synthetic receivables settling in 1 trading
+  day, routing them into Bucket 1 alongside any same-currency near-term payables
+  and receivables. This allows cash to net against Bucket 1 forward obligations.
+  Forward exposures are assigned to their natural time bucket by settlement date.
 
-=== THREE-LAYER OUTPUT ===
+  Within each bucket, positions are NETTED per currency before VaR is computed:
+    receivables → positive signed notional (long FCY)
+    payables    → negative signed notional (short FCY)
+    net         → VaR computed on |net_notional| at bucket midpoint T
+  Natural hedge benefit = gross VaR (independent) − net VaR (after netting).
 
-LAYER 1a — Spot risk (T = cash_horizon, single clear horizon):
-  Spot VaR total:        Meaningful sum — all cash positions use same T.
+  V2.2 addition: after per-currency netting, the bucket VaR is computed using
+  a covariance matrix across all currencies in the bucket rather than a simple
+  sum. Diversification benefit = simple-sum bucket VaR − covariance-adjusted VaR.
 
-LAYER 1b — Forward risk per bucket (each bucket has its own T):
-  Per-bucket net VaR:    One net VaR per time bucket. Each bucket has a
-                         bucket_var that is a meaningful sum (all currencies
-                         within the bucket share the same midpoint T).
-                         There is NO combined total across buckets since
-                         T=42, T=95, T=189 cannot be meaningfully added.
-  Natural hedge benefit: Embedded per currency within each bucket as
-                         hedge_benefit = gross_var_at_bucket_t − net_var.
-                         Shown at bucket/currency level, not aggregated.
+  There is NO combined total across buckets since T=10, T=42, T=95, T=189, T=315
+  are different time horizons that cannot be meaningfully added.
 
-  DELIBERATELY REMOVED: Combined total_var (spot + forward) and a single
-  natural_hedge_benefit total. Summing VaRs across different time horizons
-  conflates 1-day, 42-day, and 95-day risks into a misleading single number.
+SECTION 3 — Gross attribution (reference, forwards only, no netting):
+  Each forward exposure's standalone VaR at its bucket midpoint T, computed
+  independently. Cash positions NOT included. This is the before-netting picture,
+  useful for reporting how much risk natural hedging removed.
 
-LAYER 2 — Bucket attribution (what drives the risk):
-  Per bucket, per currency: net notional, net direction, net VaR
-  Per position within each bucket: standalone contribution at bucket T
-  This shows exactly which obligations are unhedged and should be targeted
-  for explicit hedging.
+=== KEY CONCEPTS ===
 
-LAYER 3 — Net currency summary (informational, NOT used for VaR):
-  Per currency: cash + receivables − payables = net economic position
-  Different time horizons make netting for VaR purposes ambiguous, so this
-  is provided as context only.
+Natural hedge benefit (within-currency netting):
+  Same currency, same time bucket. Receivable and payable offset each other.
+  benefit = gross_var_at_bucket_T − net_var_at_bucket_T ≥ 0 always.
+  Cash holdings in Bucket 1 participate in this netting (V2.3).
 
-=== NATURAL HEDGING BENEFIT — KEY CONCEPT ===
+Diversification benefit (cross-currency covariance):
+  Different currencies within the same bucket. Because USD/SGD and MYR/SGD
+  are not perfectly correlated (ρ < 1), the true portfolio VaR is less than
+  the sum of individual VaRs.
+  benefit = bucket_var_simple − bucket_var_cov ≥ 0 when ρ < 1.
 
-The natural hedge benefit is computed as:
-  Gross Forward VaR (V2): each exposure's VaR computed at BUCKET MIDPOINT T,
-                          independently, all positive, summed
-  Net Forward VaR (V2.3): VaR computed on NET notional per bucket/currency
-                          at BUCKET MIDPOINT T
-
-Both use the same T (bucket midpoint) so the only difference is netting vs not.
-The benefit = Gross − Net ≥ 0 always, since netting reduces or maintains notional.
-
-Note: Cash positions are kept separate and are NOT included in the natural hedge
-benefit calculation. Natural hedging only applies within forward exposure buckets
-(same currency, same time window). Cash vs forward netting involves different
-time horizons and is left for V2.3+ with explicit treasury policy assumptions.
+Cash as synthetic Bucket 1 receivables (V2.3):
+  Each cash holding is treated as a long position settling in 1 trading day,
+  routing it into Bucket 1 (0–21 trading days). This allows it to net against
+  any same-currency Bucket 1 payables or receivables. The cash retains a
+  'source': 'cash' tag in attribution output so it is clearly labelled.
+  Its VaR in Section 2 uses the Bucket 1 midpoint T=10, not the user-specified
+  cash_horizon — use Section 1 for the standalone T=cash_horizon cash VaR.
 """
 
 import numpy as np
@@ -86,6 +81,8 @@ from var_engine import (
     fetch_pair_returns,
     calculate_parametric_var,
     calculate_portfolio_var,
+    build_correlation_matrix,
+    calculate_portfolio_var_cov,
     TRADING_DAYS_PER_YEAR,
 )
 
@@ -159,6 +156,32 @@ def count_trading_days(settlement_date: str | date) -> int:
     # interval [today, settlement_date). The length is the number of trading days.
     bdays = pd.bdate_range(start=today, end=settlement_date, inclusive='left')
     return len(bdays)
+
+
+def trading_days_to_date(n_days: int) -> str:
+    """
+    Converts a number of trading days from today into a settlement date string.
+
+    The inverse of count_trading_days: given n trading days, returns the
+    calendar date that is n business days (Mon–Fri) from today.
+
+    Used in calculate_combined_var_v2 to convert a cash_horizon (in trading days)
+    into a synthetic settlement date, so cash positions can be treated as
+    receivables in the forward bucket netting engine.
+
+    Args:
+        n_days: Number of trading days from today (must be ≥ 1).
+
+    Returns:
+        Date string in 'YYYY-MM-DD' format.
+
+    Example:
+        If today is Monday 2026-06-08 and n_days=5 → returns '2026-06-15'
+        (the 5th business day from Monday is the following Monday, assuming
+        no holidays — Mon–Fri counting only, same caveat as count_trading_days).
+    """
+    future = pd.Timestamp(date.today()) + pd.offsets.BDay(n_days)
+    return future.strftime('%Y-%m-%d')
 
 
 def parse_settlement_date(date_str: str) -> date:
@@ -254,12 +277,13 @@ def fetch_market_data_batch(
 
     for ccy in unique_currencies:
         try:
-            ann_vol, daily_mean, _, spot_rate, used_cross = fetch_pair_returns(
+            ann_vol, daily_mean, returns, spot_rate, used_cross = fetch_pair_returns(
                 ccy, base_ccy, period
             )
             market_data[ccy] = {
                 'ann_vol':         ann_vol,
                 'daily_mean':      daily_mean,
+                'returns':         returns,   # V2.2: stored for covariance matrix
                 'spot_rate':       spot_rate,
                 'used_cross_rate': bool(used_cross),
                 'error':           None,
@@ -268,6 +292,7 @@ def fetch_market_data_batch(
             market_data[ccy] = {
                 'ann_vol':         None,
                 'daily_mean':      None,
+                'returns':         None,
                 'spot_rate':       None,
                 'used_cross_rate': False,
                 'error':           str(e),
@@ -289,23 +314,30 @@ def calculate_gross_forward_var(
 ) -> tuple[float, list[dict], list[dict]]:
     """
     Computes VaR for each future exposure INDEPENDENTLY, with no netting.
-    This is the V2 gross logic used exclusively for the natural hedging
-    benefit calculation in the Layer 1 headline.
+    Used to produce Section 3 (gross attribution reference) in the output.
+
+    Also called internally during natural hedge benefit computation: the
+    'gross_var_at_bucket_t' shown per currency in Section 2 is each exposure's
+    standalone VaR at the bucket midpoint T, which this function computes.
 
     IMPORTANT: use_bucket_t=True means each exposure uses its BUCKET's midpoint
     T rather than its own actual trading days to settlement. This is intentional —
-    the natural hedging benefit is computed as:
+    the natural hedging benefit within a bucket is computed as:
 
         benefit = gross (at bucket T) − net (at bucket T)
 
-    Using the same T for both sides makes the benefit calculation purely a
-    function of netting, not of T differences. If use_bucket_t=False, each
-    exposure uses its actual T, which gives the true V2 per-exposure VaR but
-    makes the natural hedging benefit comparison less clean.
+    Using the same T for both sides means the benefit is purely from netting,
+    not from T differences. If use_bucket_t=False, each exposure uses its actual
+    T, which gives the true per-exposure standalone VaR but makes the benefit
+    comparison less clean.
+
+    Note: Only forward exposures are passed here. Cash holdings (which appear
+    in Section 2 Bucket 1 as synthetic receivables) are NOT included — Section 3
+    is a forwards-only reference view.
 
     Args:
-        exposures:    List of exposure dicts (currency, amount, settlement_date,
-                      direction).
+        exposures:    List of forward exposure dicts (currency, amount,
+                      settlement_date, direction). No cash synthetic receivables.
         base_ccy:     Company home currency.
         market_data:  Pre-fetched market data from fetch_market_data_batch().
                       Avoids re-fetching the same pair multiple times.
@@ -427,65 +459,56 @@ def calculate_bucketed_forward_var(
     confidence:  float
 ) -> tuple[float, list[dict], list[dict]]:
     """
-    Computes parametric VaR on NET notional per time bucket per currency.
-    This is the V2.3 headline risk figure — the number the user should report
-    and manage against, since it correctly accounts for natural hedging between
-    offsetting positions in the same currency and time window.
+    Computes parametric VaR on NET notional per time bucket per currency,
+    with covariance-adjusted cross-currency aggregation within each bucket.
 
-    === HOW NETTING WORKS ===
+    === V2.2 UPGRADE: COVARIANCE-ADJUSTED BUCKET VAR ===
+
+    Previously, per-currency VaRs within a bucket were simply summed, which
+    assumed perfect positive correlation between all currency pairs — i.e. on
+    the worst day, every foreign currency moves against the base simultaneously.
+    This overstates true portfolio risk when currencies are imperfectly correlated.
+
+    V2.2 adds a covariance matrix within each bucket:
+        bucket_var_cov = Z × √(s^T Σ_T s) − portfolio_drift_T
+
+    where s is the vector of signed net exposures in base currency across all
+    currencies in that bucket, and Σ_T is their covariance matrix at bucket T.
+
+    Output changes vs V2:
+        bucket_var         → covariance-adjusted (was simple sum)
+        bucket_var_simple  → new field: the old simple-sum value (for reference)
+        diversification_benefit → new field: bucket_var_simple − bucket_var
+
+    === HOW NETTING WORKS (unchanged from V2) ===
 
     For each (bucket, currency) group:
-      1. All receivables contribute a POSITIVE signed notional (long FCY).
-      2. All payables contribute a NEGATIVE signed notional (short FCY).
-      3. Sum signed notionals to get net notional for that bucket/currency.
-      4. If net > 0: fear depreciation → direction='long'
-         If net < 0: fear appreciation → direction='short'
-         If net ≈ 0: perfectly hedged → VaR = 0
-      5. Convert |net_notional| to base currency at spot rate.
-      6. Compute VaR on |net_notional_base| at bucket midpoint T with correct direction.
-
-    === WHY THIS GIVES LOWER VaR THAN GROSS ===
-
-    Example: bucket 2 USD, recv 2mn (long) + payable 1mn (short)
-      Gross (independent): VaR(2mn, long) + VaR(1mn, short) = sum of both
-      Net (this function):  VaR(1mn, long)                    = net long 1mn
-      Benefit: VaR(1mn gross) saved by natural hedge
-
-    The natural hedging benefit = gross − net is always ≥ 0.
-
-    === ATTRIBUTION WITHIN EACH BUCKET/CURRENCY GROUP ===
-
-    For each individual exposure within a bucket/currency group, we compute:
-      'standalone_var_at_bucket_t': VaR on this exposure alone at bucket T.
-    This is used in Layer 2 of the output to show which specific obligations
-    are the largest risk drivers and should be targeted for hedging.
+      1. Receivables contribute a POSITIVE signed notional (long FCY).
+      2. Payables contribute a NEGATIVE signed notional (short FCY).
+      3. Sum signed notionals → net notional for that bucket/currency.
+      4. If net > 0: direction='long'; if net < 0: direction='short'.
+      5. Compute VaR on |net_notional_base| at bucket midpoint T.
 
     Args:
-        exposures:   List of future exposure dicts.
+        exposures:   List of exposure dicts. In normal use (Section 2) this
+                     includes BOTH actual forward exposures AND synthetic cash
+                     receivables (dicts with '_source': 'cash') generated by
+                     calculate_combined_var_v2. The '_source' field is passed
+                     through to position attribution so cash holdings are
+                     labelled distinctly from forward obligations.
+                     In Section 3 gross attribution use, only forward exposures
+                     are passed (no cash synthetic receivables).
         base_ccy:    Company home currency.
-        market_data: Pre-fetched market data from fetch_market_data_batch().
+        market_data: Pre-fetched market data (must include 'returns' series — V2.2).
         confidence:  VaR confidence level.
 
     Returns:
-        A tuple of:
-            - total_net_var  (float):      sum of all bucket net VaRs
-            - bucket_results (list[dict]): one dict per populated bucket
-            - errors         (list[dict]): exposures that could not be processed
-
-        Each bucket dict contains:
-            'bucket_num', 'bucket_label', 'midpoint_days', 'bucket_var',
-            'currencies': list of per-currency dicts, each with:
-                'currency', 'net_notional_foreign', 'net_notional_base',
-                'net_direction', 'midpoint_days', 'net_var', 'net_var_raw',
-                'var_was_floored', 'drift_warning', 'used_cross_rate',
-                'gross_var_at_bucket_t' (sum of standalones, for benefit calc),
-                'hedge_benefit' (gross − net for this currency/bucket),
-                'positions': list of individual exposure attributions
+        (total_net_var, bucket_results, errors)
+        total_net_var uses covariance-adjusted bucket_var for each bucket.
     """
     # -------------------------------------------------------------------
     # Step 1: Group valid exposures by (bucket_num, currency)
     # -------------------------------------------------------------------
-    # buckets_data[bucket_num][currency] = list of position dicts
     buckets_data: dict[int, dict[str, list]] = defaultdict(lambda: defaultdict(list))
     errors = []
 
@@ -505,18 +528,14 @@ def calculate_bucketed_forward_var(
 
         md = market_data.get(ccy)
         if md is None or md['error'] is not None:
-            continue  # Already reported in gross errors, skip silently here
+            continue
 
         actual_days = count_trading_days(settle)
         if actual_days < 1:
             continue
 
         bucket = assign_to_bucket(actual_days)
-
-        # Signed notional in FOREIGN currency:
-        # receivable = positive (long FCY), payable = negative (short FCY)
         signed_amount = amount if direction == 'receivable' else -amount
-
         settle_str = settle if isinstance(settle, str) else settle.strftime('%Y-%m-%d')
 
         buckets_data[bucket['num']][ccy].append({
@@ -526,121 +545,155 @@ def calculate_bucketed_forward_var(
             'settle_str':    settle_str,
             'md':            md,
             'bucket':        bucket,
+            # 'cash' when routed from a cash holding synthetic receivable; 'forward' otherwise
+            'source':        exp.get('_source', 'forward'),
         })
 
     # -------------------------------------------------------------------
-    # Step 2: Compute net VaR per bucket per currency
+    # Step 2: For each bucket — compute per-currency nets, then apply
+    #         covariance across currencies within the bucket.
     # -------------------------------------------------------------------
-    bucket_results = []
-    total_net_var  = 0.0
+    bucket_results  = []
+    total_net_var   = 0.0
 
     for bucket_def in BUCKET_DEFINITIONS:
         bnum = bucket_def['num']
         if bnum not in buckets_data:
-            continue  # No exposures in this bucket — skip
+            continue
 
-        T = bucket_def['midpoint_days']  # Common horizon for all in this bucket
-        bucket_currency_results = []
-        bucket_var = 0.0
+        T = bucket_def['midpoint_days']
+
+        # --- Pass A: compute per-currency net positions ---
+        # We do this first so we have all signed exposures available
+        # before building the cross-currency covariance matrix.
+        per_ccy: dict[str, dict] = {}
 
         for ccy, positions in buckets_data[bnum].items():
-            md = positions[0]['md']  # Same currency → same market data
-
-            # --- Net notional in foreign currency ---
-            # Sum all signed amounts: receivables add (+), payables subtract (-)
+            md = positions[0]['md']
             net_notional_foreign = sum(p['signed_amount'] for p in positions)
-
-            # --- Handle flat (perfectly hedged) case ---
-            if abs(net_notional_foreign) < 0.01:
-                # Receivables and payables cancel exactly — no net FX risk.
-                # Compute standalone VaRs for attribution but net VaR = 0.
-                position_details = _build_position_details(positions, md, T, confidence, ccy)
-                gross_sum = sum(p['standalone_var_at_bucket_t'] for p in position_details)
-                ann_mean  = md['daily_mean'] * TRADING_DAYS_PER_YEAR
-
-                bucket_currency_results.append({
-                    'currency':               ccy,
-                    'net_notional_foreign':   0.0,
-                    'net_notional_base':      0.0,
-                    'net_direction':          'flat',
-                    'midpoint_days':          T,
-                    'spot_rate':              round(float(md['spot_rate']),  6),
-                    'annualised_vol':         round(float(md['ann_vol']),    6),
-                    'daily_mean':             round(float(md['daily_mean']), 8),
-                    'annualised_mean':        round(float(ann_mean),         4),
-                    'net_var':                0.0,
-                    'net_var_raw':            0.0,
-                    'var_was_floored':        False,
-                    'drift_warning':          bool(abs(ann_mean) > 0.10),
-                    'used_cross_rate':        bool(md['used_cross_rate']),
-                    'gross_var_at_bucket_t':  round(float(gross_sum), 2),
-                    'hedge_benefit':          round(float(gross_sum), 2),  # 100% hedged
-                    'positions':              position_details,
-                })
-                continue
-
-            # --- Convert net notional to base currency ---
-            # exposure_base = |net_notional| × spot_rate (base per foreign)
-            net_notional_base = abs(net_notional_foreign) * md['spot_rate']
-
-            # --- Direction from sign of net notional ---
-            # Net positive (more receivables than payables): fear FCY depreciates → long
-            # Net negative (more payables than receivables): fear FCY appreciates → short
-            net_direction = 'long' if net_notional_foreign > 0 else 'short'
-
-            # --- Compute VaR on net notional at bucket midpoint T ---
-            var_floored, var_raw = calculate_parametric_var(
-                exposure_amount    = net_notional_base,
-                annualised_vol     = md['ann_vol'],
-                daily_mean_return  = md['daily_mean'],
-                confidence_level   = confidence,
-                days               = T,
-                direction          = net_direction,
-            )
-
-            # --- Per-position attribution ---
-            # Compute each position's standalone VaR at bucket T for Layer 2.
-            # Using bucket T (not actual days) for consistency — same T as net VaR.
             position_details = _build_position_details(positions, md, T, confidence, ccy)
             gross_sum = sum(p['standalone_var_at_bucket_t'] for p in position_details)
+            ann_mean  = md['daily_mean'] * TRADING_DAYS_PER_YEAR
 
-            # Natural hedge benefit for this specific currency/bucket:
-            # How much VaR was saved by netting vs computing gross independently
-            hedge_benefit = gross_sum - float(var_floored)
+            if abs(net_notional_foreign) < 0.01:
+                # Perfectly hedged — no net risk, full hedge benefit
+                per_ccy[ccy] = {
+                    'flat': True,
+                    'net_notional_foreign':   0.0,
+                    'net_notional_base':      0.0,
+                    'net_notional_base_signed': 0.0,
+                    'net_direction':          'flat',
+                    'var_floored':            0.0,
+                    'var_raw':                0.0,
+                    'gross_sum':              gross_sum,
+                    'hedge_benefit':          gross_sum,
+                    'ann_mean':               ann_mean,
+                    'position_details':       position_details,
+                    'md':                     md,
+                }
+                continue
 
-            ann_mean = md['daily_mean'] * TRADING_DAYS_PER_YEAR
-            bucket_var += float(var_floored)
+            net_notional_base = abs(net_notional_foreign) * md['spot_rate']
+            net_direction     = 'long' if net_notional_foreign > 0 else 'short'
+            # Signed: positive for long (fear depreciation), negative for short
+            net_base_signed   = net_notional_base if net_direction == 'long' else -net_notional_base
+
+            var_floored, var_raw = calculate_parametric_var(
+                net_notional_base, md['ann_vol'], md['daily_mean'],
+                confidence, T, net_direction
+            )
+
+            per_ccy[ccy] = {
+                'flat': False,
+                'net_notional_foreign':     net_notional_foreign,
+                'net_notional_base':        net_notional_base,
+                'net_notional_base_signed': net_base_signed,
+                'net_direction':            net_direction,
+                'var_floored':              float(var_floored),
+                'var_raw':                  float(var_raw),
+                'gross_sum':                gross_sum,
+                'hedge_benefit':            gross_sum - float(var_floored),
+                'ann_mean':                 ann_mean,
+                'position_details':         position_details,
+                'md':                       md,
+            }
+
+        # --- Pass B: covariance-adjusted bucket VaR ---
+        # Collect active (non-flat) currencies and build cross-currency
+        # covariance matrix from their historical returns.
+        active_ccys    = [c for c in per_ccy if not per_ccy[c]['flat']]
+        bucket_var_simple = sum(per_ccy[c]['var_floored'] for c in active_ccys)
+
+        bucket_var_cov = bucket_var_simple   # default: falls back to simple sum
+
+        if len(active_ccys) >= 2:
+            returns_dict = {
+                c: per_ccy[c]['md']['returns']
+                for c in active_ccys
+                if per_ccy[c]['md'].get('returns') is not None
+            }
+
+            if len(returns_dict) >= 2:
+                corr_matrix, corr_ccys = build_correlation_matrix(returns_dict)
+
+                # Build vectors aligned to corr_ccys order
+                sig   = [per_ccy[c]['net_notional_base_signed'] for c in corr_ccys]
+                vols  = [per_ccy[c]['md']['ann_vol']             for c in corr_ccys]
+                means = [per_ccy[c]['md']['daily_mean']          for c in corr_ccys]
+
+                cov_var, _ = calculate_portfolio_var_cov(
+                    sig, vols, means, corr_matrix, confidence, T
+                )
+
+                # Add individual VaRs for any currencies without returns data
+                # (edge case — should not occur in practice)
+                missing_ccys = [c for c in active_ccys if c not in returns_dict]
+                for c in missing_ccys:
+                    cov_var += per_ccy[c]['var_floored']
+
+                bucket_var_cov = cov_var
+
+        diversification_benefit = round(max(bucket_var_simple - bucket_var_cov, 0.0), 2)
+
+        # --- Pass C: build per-currency result dicts ---
+        bucket_currency_results = []
+        for ccy in sorted(per_ccy.keys()):   # sorted for deterministic output order
+            d  = per_ccy[ccy]
+            md = d['md']
 
             bucket_currency_results.append({
                 'currency':               ccy,
-                'net_notional_foreign':   round(float(net_notional_foreign), 2),
-                'net_notional_base':      round(float(net_notional_base),    2),
-                'net_direction':          net_direction,
+                'net_notional_foreign':   round(float(d['net_notional_foreign']),  2),
+                'net_notional_base':      round(float(d['net_notional_base']),     2),
+                'net_direction':          d['net_direction'],
                 'midpoint_days':          T,
                 'spot_rate':              round(float(md['spot_rate']),    6),
                 'annualised_vol':         round(float(md['ann_vol']),      6),
                 'daily_mean':             round(float(md['daily_mean']),   8),
-                'annualised_mean':        round(float(ann_mean),           4),
-                'net_var':                round(float(var_floored),        2),
-                'net_var_raw':            round(float(var_raw),            2),
-                'var_was_floored':        bool(var_raw < 0),
-                'drift_warning':          bool(abs(ann_mean) > 0.10),
+                'annualised_mean':        round(float(d['ann_mean']),      4),
+                'net_var':                round(float(d['var_floored']),   2),
+                'net_var_raw':            round(float(d['var_raw']),       2),
+                'var_was_floored':        bool(d['var_raw'] < 0),
+                'drift_warning':          bool(abs(d['ann_mean']) > 0.10),
                 'used_cross_rate':        bool(md['used_cross_rate']),
-                # gross_var_at_bucket_t: what VaR would have been without netting
-                # (all positions independent, all positive, at bucket T)
-                'gross_var_at_bucket_t':  round(float(gross_sum),      2),
-                # hedge_benefit: VaR saved by natural hedging within this group
-                'hedge_benefit':          round(float(hedge_benefit),   2),
-                'positions':              position_details,
+                'gross_var_at_bucket_t':  round(float(d['gross_sum']),    2),
+                'hedge_benefit':          round(float(d['hedge_benefit']), 2),
+                'positions':              d['position_details'],
             })
 
-        total_net_var += bucket_var
+        total_net_var += bucket_var_cov
+
         bucket_results.append({
-            'bucket_num':    bnum,
-            'bucket_label':  bucket_def['label'],
-            'midpoint_days': T,
-            'currencies':    bucket_currency_results,
-            'bucket_var':    round(float(bucket_var), 2),
+            'bucket_num':              bnum,
+            'bucket_label':            bucket_def['label'],
+            'midpoint_days':           T,
+            'currencies':              bucket_currency_results,
+            # bucket_var: covariance-adjusted (V2.2 default)
+            'bucket_var':              round(float(bucket_var_cov),          2),
+            # bucket_var_simple: old simple-sum, shown for transparency
+            'bucket_var_simple':       round(float(bucket_var_simple),       2),
+            # diversification_benefit: VaR reduction from cross-currency correlations
+            'diversification_benefit': diversification_benefit,
         })
 
     return round(float(total_net_var), 2), bucket_results, errors
@@ -655,24 +708,39 @@ def _build_position_details(
 ) -> list[dict]:
     """
     Internal helper. For a list of positions in the same bucket/currency group,
-    computes the standalone VaR for each individual exposure at the given T.
+    computes the standalone VaR for each individual position at the bucket T.
 
-    'Standalone VaR at bucket T' means: what would this exposure's VaR be if
+    'Standalone VaR at bucket T' means: what would this position's VaR be if
     it were the only position in this bucket/currency — using the bucket's
     midpoint T for consistency with the net VaR calculation.
 
-    This is the attribution figure shown in Layer 2. It answers: "if we didn't
-    have the offsetting position, how much would this exposure contribute?"
+    This is the attribution figure shown in Section 2. It answers: "if we didn't
+    have the offsetting position, how much would this one contribute?"
+
+    Each position dict in `positions` comes from the buckets_data grouping and
+    may have a 'source' field:
+        'forward' (default): a normal future payable or receivable
+        'cash':              a cash holding routed into Bucket 1 as a synthetic
+                             receivable (settlement = tomorrow). Labelled clearly
+                             in the attribution output so cash and forwards are
+                             visually distinct.
 
     Args:
-        positions: List of position dicts from buckets_data grouping.
-        md:        Market data for this currency.
-        T:         Bucket midpoint trading days.
+        positions:  List of position dicts from buckets_data grouping. Each has:
+                    'signed_amount', 'actual_days', 'direction', 'settle_str',
+                    'md', 'bucket', 'source' ('cash' or 'forward').
+        md:         Market data for this currency (ann_vol, daily_mean, etc.).
+        T:          Bucket midpoint trading days — used as VaR horizon.
         confidence: VaR confidence level.
-        ccy:       Currency code (for output labelling).
+        ccy:        Currency code (for output labelling).
 
     Returns:
-        List of attribution dicts, one per position.
+        List of attribution dicts, one per position. Each dict contains:
+            'currency', 'amount', 'direction', 'settlement_date',
+            'actual_trading_days', 'bucket_midpoint_days', 'notional_base',
+            'standalone_var_at_bucket_t', 'standalone_var_raw', 'var_was_floored',
+            'used_cross_rate', 'drift_warning', 'near_term_warning',
+            'source' ('cash' or 'forward')
     """
     details = []
     ann_mean = md['daily_mean'] * TRADING_DAYS_PER_YEAR
@@ -700,115 +768,98 @@ def _build_position_details(
             'actual_trading_days':       int(p['actual_days']),
             'bucket_midpoint_days':      T,
             'notional_base':             round(float(p_exposure_base),      2),
-            # VaR on this exposure alone at bucket T — attribution figure for Layer 2.
-            # NOT the same as the V2 standalone VaR (which uses actual_trading_days T).
-            # Using bucket T keeps the attribution consistent with the net VaR figure.
             'standalone_var_at_bucket_t': round(float(p_var_floored),       2),
             'standalone_var_raw':        round(float(p_var_raw),            2),
             'var_was_floored':           bool(p_var_raw < 0),
             'used_cross_rate':           bool(md['used_cross_rate']),
             'drift_warning':             bool(abs(ann_mean) > 0.10),
             'near_term_warning':         bool(p['actual_days'] < 5),
+            # 'cash' for positions routed from cash holdings; 'forward' otherwise
+            'source':                    p.get('source', 'forward'),
         })
 
     return details
 
 
 # =============================================================================
-# NET CURRENCY SUMMARY (INFORMATIONAL)
+# COVARIANCE HELPERS FOR SPOT RISK — V2.2
 # =============================================================================
 
-def build_net_currency_summary(
-    cash_positions: list[dict],
-    exposures:      list[dict],
-    base_ccy:       str,
-    spot_rates:     dict[str, float]
-) -> list[dict]:
+def _add_covariance_to_spot_risk(
+    spot_risk:   dict,
+    market_data: dict,
+    confidence:  float,
+) -> dict:
     """
-    Builds an informational per-currency net position summary combining
-    cash holdings and all future exposures. NOT used for VaR computation.
+    Augments the spot_risk dict (produced by calculate_portfolio_var) with
+    a covariance-adjusted total VaR across cash positions.
 
-    WHY NOT USED FOR VaR:
-      Cash positions and future exposures have different VaR horizons:
-        Cash: user-specified T (e.g. 1 day)
-        Receivable: T = days to settlement (e.g. 53 days)
-        Payable:    T = days to settlement (e.g. 107 days)
-      Netting them for a single VaR figure would require choosing an arbitrary
-      common T, which could misrepresent the risk. The bucketed approach handles
-      forward-forward netting correctly; cash vs forward netting is left for
-      V2.3+ with explicit treasury policy assumptions.
+    calculate_portfolio_var sums individual VaRs (perfect correlation).
+    This function re-computes the total using the covariance matrix of the
+    actual return series, adding:
 
-    WHAT IT SHOWS:
-      Per currency: net = cash_holdings + receivables − payables
-      All in base currency at current spot rates.
-      Positive net = overall long FCY (fear depreciation).
-      Negative net = overall short FCY (fear appreciation).
+        'total_var_cov':           covariance-adjusted portfolio VaR
+        'diversification_benefit': total_var (simple sum) − total_var_cov
+
+    If fewer than 2 positions exist, or insufficient aligned data, falls back
+    to simple sum (total_var_cov = total_var, benefit = 0).
 
     Args:
-        cash_positions: List of V1 cash dicts (currency, balance).
-        exposures:      List of future exposure dicts (currency, amount, direction).
-        base_ccy:       Company home currency.
-        spot_rates:     Dict of currency → spot rate (base per foreign), sourced
-                        from the market_data cache to avoid re-fetching.
+        spot_risk:   The dict returned by calculate_portfolio_var. Modified in place.
+        market_data: Cache from fetch_market_data_batch, which now includes 'returns'.
+        confidence:  VaR confidence level (needed to re-run portfolio VaR formula).
 
     Returns:
-        List of dicts sorted by abs(net_base) descending (largest exposures first).
-        Each dict: 'currency', 'cash_base', 'receivables_base', 'payables_base',
-                   'net_base', 'net_direction' ('long', 'short', or 'flat')
+        The same spot_risk dict with two new keys added.
     """
-    summary: dict[str, dict] = {}
+    positions = spot_risk.get('positions', [])
+    T         = spot_risk['days']
 
-    def get_or_create(ccy: str) -> dict:
-        if ccy not in summary:
-            summary[ccy] = {
-                'currency':         ccy,
-                'cash_base':        0.0,
-                'receivables_base': 0.0,
-                'payables_base':    0.0,
-            }
-        return summary[ccy]
+    if len(positions) < 2:
+        spot_risk['total_var_cov']           = spot_risk['total_var']
+        spot_risk['diversification_benefit'] = 0.0
+        return spot_risk
 
-    # Cash holdings — always long FCY (spot risk, no settlement date)
-    for pos in cash_positions:
-        ccy = pos['currency'].upper().strip()
-        if ccy == base_ccy.upper():
-            continue
-        spot  = spot_rates.get(ccy, 1.0)
-        value = float(pos['balance']) * spot
-        get_or_create(ccy)['cash_base'] += value
+    returns_dict = {}
+    for p in positions:
+        md = market_data.get(p['currency'])
+        if md and md.get('returns') is not None:
+            returns_dict[p['currency']] = md['returns']
 
-    # Future exposures — direction determines sign
-    for exp in exposures:
-        ccy       = exp['currency'].upper().strip()
-        direction = exp['direction'].lower().strip()
-        if ccy == base_ccy.upper():
-            continue
-        spot  = spot_rates.get(ccy, 1.0)
-        value = float(exp['amount']) * spot
-        bucket = get_or_create(ccy)
-        if direction == 'receivable':
-            bucket['receivables_base'] += value
-        elif direction == 'payable':
-            bucket['payables_base'] += value
+    if len(returns_dict) < 2:
+        spot_risk['total_var_cov']           = spot_risk['total_var']
+        spot_risk['diversification_benefit'] = 0.0
+        return spot_risk
 
-    # Compute net and label direction
-    result = []
-    for ccy, b in summary.items():
-        # net = cash (long) + receivables (long) − payables (short)
-        net = b['cash_base'] + b['receivables_base'] - b['payables_base']
-        net_dir = 'long' if net > 0.01 else ('short' if net < -0.01 else 'flat')
-        result.append({
-            'currency':         ccy,
-            'cash_base':        round(b['cash_base'],        2),
-            'receivables_base': round(b['receivables_base'], 2),
-            'payables_base':    round(b['payables_base'],    2),
-            'net_base':         round(net,                   2),
-            'net_direction':    net_dir,
-        })
+    corr_matrix, corr_ccys = build_correlation_matrix(returns_dict)
 
-    # Sort by absolute net exposure, largest first
-    result.sort(key=lambda x: abs(x['net_base']), reverse=True)
-    return result
+    # All cash positions are LONG (fear FCY depreciation) → signed = +exposure_base
+    data_by_ccy = {p['currency']: p for p in positions}
+
+    sig   = [data_by_ccy[c]['exposure_base']   for c in corr_ccys if c in data_by_ccy]
+    vols  = [data_by_ccy[c]['annualised_vol']   for c in corr_ccys if c in data_by_ccy]
+    means = [data_by_ccy[c]['daily_mean']       for c in corr_ccys if c in data_by_ccy]
+
+    # Add any currencies that had no returns series (fall back to simple contribution)
+    missing_var = sum(
+        data_by_ccy[c]['var']
+        for c in data_by_ccy
+        if c not in returns_dict
+    )
+
+    if len(sig) >= 2:
+        total_var_cov, _ = calculate_portfolio_var_cov(
+            sig, vols, means, corr_matrix, confidence, T
+        )
+        total_var_cov += missing_var
+    else:
+        total_var_cov = spot_risk['total_var']
+
+    spot_risk['total_var_cov']           = round(float(total_var_cov), 2)
+    spot_risk['diversification_benefit'] = round(
+        float(max(spot_risk['total_var'] - total_var_cov, 0.0)), 2
+    )
+    return spot_risk
 
 
 # =============================================================================
@@ -824,103 +875,66 @@ def calculate_combined_var_v2(
     cash_horizon:   int   = 1
 ) -> dict:
     """
-    Main V2 entry point. Computes the full three-layer FX VaR for a portfolio
-    containing both cash positions and future FX exposures.
+    Main V2 entry point. Computes the full three-section FX VaR output.
 
-    === THREE-LAYER OUTPUT ===
+    === THREE-SECTION OUTPUT ===
 
-    LAYER 1 — Headline numbers (what to report and manage against):
-      'spot_risk':              V1 cash VaR (unchanged, user-specified horizon)
-      'forward_net':            V2.3 bucketed net VaR (after natural hedging)
-      'total_var':              spot + forward_net
-      'natural_hedge_benefit':  forward_gross − forward_net
-                                (how much risk offsetting positions removed)
+    SECTION 1 — Spot book risk (standalone, T = cash_horizon):
+        VaR on current cash holdings at the user-specified horizon.
+        Covariance-adjusted total + diversification benefit added (V2.2).
+        Completely independent of forward exposures.
 
-    LAYER 2 — Bucket attribution (what drives forward_net):
-      Inside 'forward_net.buckets': per-bucket, per-currency breakdown
-      showing net notional, net direction, net VaR, and individual position
-      attribution figures (standalone VaR at bucket T for each exposure).
+    SECTION 2 — Unified bucketed risk (cash + forwards, covariance-adjusted):
+        Cash positions are treated as synthetic receivables settling in
+        1 trading day, routing them into Bucket 1 alongside any same-currency
+        near-term payables/receivables. This allows cash to net against
+        Bucket 1 forward obligations — fixing the V2 limitation where cash
+        and forwards were completely separate pipelines.
+        All five buckets use covariance-adjusted VaR across currencies (V2.2).
+        Natural hedging benefit shown per currency where netting occurred.
+        Diversification benefit shown per bucket where 2+ currencies exist.
 
-    LAYER 3 — Net currency summary (informational):
-      'net_currency_summary': combined cash + recv − payables per currency,
-      all in base currency at spot rates. NOT used for VaR.
-
-    === WHY NO SINGLE COMBINED GROSS+NET TOTAL ===
-
-    Cash positions and forward exposures use different T values (user-specified
-    vs settlement-date-derived). Summing gross cash VaR with gross forward VaR
-    would add figures computed at incompatible horizons. The total_var here
-    uses spot_var (V1) + forward_NET_var (V2.3), which is the most meaningful
-    combination: V1 is accurate for cash, V2.3 is accurate for forwards.
-
-    === KNOWN LIMITATION: CASH VS FORWARD NATURAL HEDGING ===
-
-    Natural hedging is currently only applied WITHIN forward exposure buckets.
-    Cash positions are not netted against forward exposures even if they are in
-    the same currency (e.g. USD 5mn cash + USD 3mn payable). Netting cash with
-    forwards would require treasury policy assumptions (will the cash be held to
-    fund the payable, or converted before settlement?). This is left for V2.3+.
+    SECTION 3 — Gross attribution (reference, forwards only, no netting):
+        Shows each forward exposure's standalone VaR at its bucket T.
+        Used to illustrate what risk would have been without any netting.
+        Cash positions are NOT included here — this is a forwards-only reference.
 
     Args:
-        cash_positions: List of cash dicts, each with:
-                          'currency' (str): foreign currency ISO code
-                          'balance'  (float): amount held
-        exposures:      List of future exposure dicts, each with:
-                          'currency'        (str): foreign currency
-                          'amount'          (float): positive amount in FCY
-                          'settlement_date' (str): 'YYYY-MM-DD'
-                          'direction'       (str): 'payable' or 'receivable'
+        cash_positions: List of cash dicts with 'currency' and 'balance'.
+        exposures:      List of future exposure dicts with 'currency', 'amount',
+                        'settlement_date', and 'direction'.
         base_ccy:       Company home currency (e.g. 'SGD').
-        confidence:     VaR confidence level (default 0.95 = 95%).
+        confidence:     VaR confidence level (default 0.95).
         period:         Historical lookback for yfinance (default '1y').
-        cash_horizon:   VaR horizon in trading days for cash positions
-                        (default 1 = 1-day VaR). Does not affect forward VaR,
-                        which always uses each exposure's own settlement horizon
-                        (bucketed to midpoint T).
+        cash_horizon:   T in trading days for Section 1 spot VaR (default 1).
 
     Returns:
-        A dict with:
-            'base_ccy'              (str)
-            'confidence'            (float)
-            'cash_horizon'          (int)
+        {
+            'base_ccy':          str,
+            'confidence':        float,
+            'cash_horizon':      int,
 
-            'spot_risk': {          ← Layer 1 spot (V1 format, unchanged)
-                'total_var', 'positions', 'errors'
-            }
-
-            'forward_gross': {      ← V2 gross per-exposure at actual T
-                # No total_var — each exposure uses its own T
-                'exposures', 'errors'
-            }
-
-            'forward_net': {        ← Layer 1b & 2 forward net (V2.3 bucketed)
-                # No total_var — buckets use different Ts
-                # bucket_var within each bucket IS meaningful (same T)
-                # hedge_benefit embedded per currency in each bucket
-                'buckets', 'errors'
-            }
-
-            # No total_var — spot T ≠ forward bucket Ts, cannot be summed
-
-            'net_currency_summary'  (list):  Layer 3 informational
+            'spot_risk':         dict,   # Section 1 — standalone cash VaR
+            'unified_buckets':   dict,   # Section 2 — cash + forwards unified
+            'gross_attribution': dict,   # Section 3 — reference, no netting
+        }
     """
     # -----------------------------------------------------------------------
-    # Step 1: Collect all unique currencies and batch-fetch market data once.
-    # This avoids hitting Yahoo Finance multiple times for the same pair.
+    # Step 1: Batch-fetch all market data once.
     # -----------------------------------------------------------------------
     all_currencies = (
         [pos['currency'] for pos in cash_positions] +
         [exp['currency'] for exp in exposures]
     )
     print(f"  Fetching market data for {len(set(c.upper() for c in all_currencies if c.upper() != base_ccy.upper()))} unique currency pairs…")
-
     market_data = fetch_market_data_batch(all_currencies, base_ccy, period)
 
     # -----------------------------------------------------------------------
-    # Step 2: Spot risk (V1 cash positions, completely unchanged from V1).
-    # Delegates entirely to calculate_portfolio_var in var_engine.py.
+    # Step 2: Section 1 — standalone spot book VaR at cash_horizon.
+    # Uses V1 calculate_portfolio_var for individual breakdowns,
+    # then augments with covariance-adjusted total (V2.2).
     # -----------------------------------------------------------------------
-    print("  Computing spot risk (V1 cash positions)…")
+    print("  Section 1 — spot book VaR (standalone, T={})…".format(cash_horizon))
     spot_result = calculate_portfolio_var(
         positions        = cash_positions,
         base_ccy         = base_ccy,
@@ -928,54 +942,50 @@ def calculate_combined_var_v2(
         period           = period,
         days             = cash_horizon,
     )
+    _add_covariance_to_spot_risk(spot_result, market_data, confidence)
 
     # -----------------------------------------------------------------------
-    # Step 3: Gross forward VaR (V2 independent, for natural hedge calculation).
-    # Each exposure at bucket midpoint T, independent, all positive, summed.
-    # This is NOT the headline forward risk figure — it's used only to compute
-    # how much the bucketed netting saves.
+    # Step 3: Section 2 — unified bucketed VaR (cash + forwards).
+    # Convert cash positions to synthetic Bucket 1 receivables (settlement
+    # = 1 trading day from today → always falls in Bucket 1: 0–21 days).
+    # Combine with actual forward exposures and run bucket netting + covariance.
     # -----------------------------------------------------------------------
-    print("  Computing gross forward VaR (V2 independent)…")
-    gross_forward_var, gross_exposures, gross_errors = calculate_gross_forward_var(
+    print("  Section 2 — unified bucketed VaR (cash in Bucket 1 + forwards)…")
+    settle_bucket1 = trading_days_to_date(1)
+
+    cash_as_receivables = [
+        {
+            'currency':        pos['currency'].upper().strip(),
+            'amount':          float(pos['balance']),
+            'settlement_date': settle_bucket1,
+            'direction':       'receivable',
+            '_source':         'cash',   # label for attribution display
+        }
+        for pos in cash_positions
+        if pos['currency'].upper().strip() != base_ccy.upper()
+    ]
+
+    unified_exposures = cash_as_receivables + exposures
+
+    _, bucket_results, bucket_errors = calculate_bucketed_forward_var(
+        exposures    = unified_exposures,
+        base_ccy     = base_ccy,
+        market_data  = market_data,
+        confidence   = confidence,
+    )
+
+    # -----------------------------------------------------------------------
+    # Step 4: Section 3 — gross attribution (forwards only, no netting).
+    # Cash positions are NOT included here — this is a reference view of
+    # forward exposures before any netting is applied.
+    # -----------------------------------------------------------------------
+    print("  Section 3 — gross attribution (forwards only, no netting)…")
+    _, gross_exposures, gross_errors = calculate_gross_forward_var(
         exposures    = exposures,
         base_ccy     = base_ccy,
         market_data  = market_data,
         confidence   = confidence,
-        use_bucket_t = True,   # Use bucket T for consistency with net calc
-    )
-
-    # -----------------------------------------------------------------------
-    # Step 4: Net forward VaR (V2.3 bucketed netting — the headline figure).
-    # Net notional per bucket per currency, VaR on net, at bucket midpoint T.
-    # -----------------------------------------------------------------------
-    print("  Computing net forward VaR (V2.3 bucketed netting)…")
-    net_forward_var, bucket_results, bucket_errors = calculate_bucketed_forward_var(
-        exposures    = exposures,
-        base_ccy     = base_ccy,
-        market_data  = market_data,
-        confidence   = confidence,
-    )
-
-    # -----------------------------------------------------------------------
-    # Step 5: Net currency summary (informational only).
-    # There is no combined total_var across spot + forward buckets.
-    # Spot VaR is the only meaningful combined figure (all cash share same T).
-    # Forward bucket VaRs each have their own T — they cannot be summed.
-    # Natural hedge benefit is embedded per bucket/currency in forward_net.
-    #
-    # Build spot_rates lookup from market_data cache to avoid re-fetching.
-    # -----------------------------------------------------------------------
-    spot_rates = {
-        ccy: md['spot_rate']
-        for ccy, md in market_data.items()
-        if md['error'] is None and md['spot_rate'] is not None
-    }
-
-    net_summary = build_net_currency_summary(
-        cash_positions = cash_positions,
-        exposures      = exposures,
-        base_ccy       = base_ccy,
-        spot_rates     = spot_rates,
+        use_bucket_t = True,
     )
 
     return {
@@ -983,34 +993,25 @@ def calculate_combined_var_v2(
         'confidence':   float(confidence),
         'cash_horizon': int(cash_horizon),
 
-        # Layer 1a: Spot risk — total_var is meaningful here because all
-        # cash positions share the same user-specified cash_horizon T.
+        # Section 1: standalone spot book VaR (unchanged from V1 per-position).
+        # V2.2 additions: total_var_cov, diversification_benefit.
         'spot_risk': spot_result,
 
-        # Layer 1b reference: V2 gross per-exposure at actual settlement T.
-        # No total_var — each exposure uses its own actual T, so the sum
-        # would mix different horizons and be misleading.
-        # These figures give the true standalone VaR per obligation and feed
-        # the per-bucket attribution (standalone_var_at_bucket_t) used for
-        # the natural hedge benefit calculation in forward_net.
-        'forward_gross': {
-            'exposures': gross_exposures,
-            'errors':    gross_errors,
-        },
-
-        # Layer 1b & 2: Forward net (V2.3 bucketed netting).
-        # bucket_var within each bucket IS meaningful — all currencies within
-        # a bucket share the same midpoint T.
-        # There is NO cross-bucket total — T=42, T=95, T=189 cannot be summed.
-        # Natural hedge benefit is embedded per currency as:
-        #   'gross_var_at_bucket_t' − 'net_var' = 'hedge_benefit'
-        'forward_net': {
+        # Section 2: unified bucketed VaR — cash in Bucket 1 + all forwards.
+        # bucket_var: covariance-adjusted (V2.2).
+        # bucket_var_simple: old simple sum (for comparison).
+        # diversification_benefit: bucket_var_simple − bucket_var.
+        # hedge_benefit per currency: VaR saved by within-currency netting.
+        # source field in attribution: 'cash' or 'forward'.
+        'unified_buckets': {
             'buckets': bucket_results,
             'errors':  bucket_errors,
         },
 
-        # Layer 3: Informational net position per currency.
-        # NOT used for VaR — different horizons make cross-position netting
-        # ambiguous for risk purposes.
-        'net_currency_summary': net_summary,
+        # Section 3: gross per-exposure standalone VaRs at bucket T.
+        # Forwards only — no cash, no netting. Reference use only.
+        'gross_attribution': {
+            'exposures': gross_exposures,
+            'errors':    gross_errors,
+        },
     }

@@ -71,19 +71,19 @@ def calculate():
             ]
         }
 
-    Returns the three-layer result dict from calculate_combined_var_v2():
+    Returns the three-section result dict from calculate_combined_var_v2():
         {
             "base_ccy":    "SGD",
             "confidence":  0.95,
             "cash_horizon": 1,
-            "spot_risk":    { "total_var", "days", "positions", "errors" },
-            "forward_gross": { "exposures", "errors" },
-            "forward_net":  { "buckets", "errors" },
-            "net_currency_summary": [...]
+            "spot_risk":         { "total_var", "total_var_cov", "diversification_benefit",
+                                   "positions", "errors" },
+            "unified_buckets":   { "buckets", "errors" },
+            "gross_attribution": { "exposures", "errors" }
         }
 
-    No combined total_var is returned — bucket VaRs use different time
-    horizons and cannot be meaningfully summed. See exposure_engine.py
+    No combined total across buckets is returned — each bucket uses a different
+    time horizon T and they cannot be meaningfully summed. See exposure_engine.py
     module docstring for the full explanation.
     """
     data = request.get_json()

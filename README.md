@@ -19,22 +19,11 @@ benefit computation. All computation runs server-side in Python.
 
 ## Features
 
-- **Cash Position VaR (V1):** 1-day to 30-day parametric VaR on current cash
-  holdings across any base currency, using historical volatility and drift
-- **Future Exposure VaR (V2):** Time-bucketed net VaR for payables and
-  receivables, each at their natural settlement horizon
-- **Natural Hedging Benefit:** Quantifies how much risk offsetting positions
-  in the same currency and time window cancel out
-- **Three-Layer Output:**
-  - Layer 1a: Spot cash risk (single clear horizon)
-  - Layer 1b & 2: Forward bucket risk with attribution (no combined total —
-    different buckets use different T, cannot be meaningfully summed)
-  - Layer 3: Net currency summary (informational)
-- **Cross-Rate Construction:** Thinly traded pairs (e.g. MYR/SGD) are
-  automatically synthesised via USD legs
-- **Direction-Aware Formula:** Payables use the short formula
-  VaR = E × (Z × σ_T + μ_T); receivables use the long formula
-  VaR = E × (Z × σ_T − μ_T)
+- **Section 1 — Spot Book Risk:** Standalone VaR on current cash holdings at user-specified T. Covariance-adjusted total + diversification benefit (V2.2).
+- **Section 2 — Unified Bucketed Risk:** Cash positions routed into Bucket 1 as synthetic receivables, netting against same-currency near-term obligations. Forward exposures in natural buckets. Natural hedging (within-currency) and covariance adjustment (cross-currency) applied per bucket (V2.2/2.3).
+- **Section 3 — Gross Attribution:** Standalone VaR per forward exposure at its bucket T. Reference only — no netting applied.
+- **Direction-Aware Formula:** Payables use short formula (fear FCY appreciation); receivables and cash use long formula (fear FCY depreciation).
+- **Cross-Rate Construction:** Thinly traded pairs synthesised via USD legs.
 
 ---
 
@@ -143,14 +132,14 @@ Positions are netted within each bucket/currency before VaR is computed.
 
 ## Known Limitations (PoC)
 
-| Limitation | Planned fix |
-|---|---|
-| yfinance is an unofficial scrape — can break | Replace with FRED + CurrencyLayer |
-| Normal distribution understates fat tails for crashing currencies (TRY, ARS) | Monte Carlo with Student's t (V3) |
-| Simple sum across currencies within a bucket (assumes perfect correlation) | Covariance matrix (V2.2) |
-| Cash vs forward netting not implemented (different T values) | Time-bucketed net open position (V2.3) |
-| Bucket midpoint T approximates each exposure's actual settlement T | Exposure-weighted average T per bucket |
-| No holiday calendar — counts Mon–Fri only | Market-specific calendar (SGX, NYSE) |
+| Limitation | Status | Planned fix |
+|---|---|---|
+| yfinance is an unofficial scrape — can break | ⚠️ Open | Replace with FRED + CurrencyLayer |
+| Normal distribution understates fat tails for crashing currencies (TRY, ARS) | ⚠️ Open | Monte Carlo with Student's t (V3) |
+| Simple sum across currencies within a bucket (assumes perfect correlation) | ✅ Fixed V2.2 | Covariance matrix now used within each bucket; `bucket_var_simple` retained for comparison |
+| Cash vs forward netting not implemented (different T values) | ✅ Fixed V2.3 | `combined_net` (Layer 4): nets cash + receivables − payables per currency at T = cash\_horizon with covariance. Policy assumption: cash is immediately available to fund payables. Use bucketed forward VaR (Layer 1b/2) for time-stratified risk |
+| Bucket midpoint T approximates each exposure's actual settlement T | ⚠️ Open | Exposure-weighted average T per bucket |
+| No holiday calendar — counts Mon–Fri only | ⚠️ Open | Market-specific calendar (SGX, NYSE) |
 
 ---
 

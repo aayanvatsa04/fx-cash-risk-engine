@@ -606,8 +606,8 @@
     </p>
   </header>
 
-  <!-- ── CONFIG ── -->
-  <div class="section-title">Configuration</div>
+  <!-- ── GLOBAL SETTINGS ── -->
+  <div class="section-title">Global Settings</div>
   <div class="config-strip">
     <div class="config-field">
       <label>Base Currency</label>
@@ -645,15 +645,10 @@
         <option value="6mo">6 months</option>
       </select>
     </div>
-    <div class="config-field">
-      <label>Cash VaR Horizon</label>
-      <select id="cashHorizon">
-        <option value="1" selected>1 day</option>
-        <option value="5">5 days (1 week)</option>
-        <option value="21">21 days (1 month)</option>
-        <option value="30">30 days</option>
-      </select>
-    </div>
+  </div>
+  <div style="font-family:var(--mono);font-size:11px;color:var(--muted);
+              margin-top:-8px;margin-bottom:24px">
+    Applied to all VaR calculations throughout — spot book and all forward buckets.
   </div>
 
   <!-- ── CASH POSITIONS ── -->
@@ -674,8 +669,55 @@
     <span style="font-size:16px">+</span> Add cash position
   </button>
 
+  <!-- ── CASH VAR HORIZON — Section 1 input only ── -->
+  <div class="section-title" style="margin-top:32px">Cash VaR Horizon</div>
+  <div class="config-strip" style="margin-bottom:4px">
+    <div class="config-field">
+      <label>Time Horizon (T)</label>
+      <select id="cashHorizon">
+        <option value="1" selected>1 day</option>
+        <option value="5">5 days (1 week)</option>
+        <option value="21">21 days (1 month)</option>
+        <option value="30">30 days</option>
+      </select>
+    </div>
+  </div>
+  <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:16px">
+    Sets T for the standalone cash book VaR shown immediately below.
+    Has no effect on forward bucket calculations — each forward exposure
+    uses its own settlement date to determine T.
+  </div>
+
+  <!-- ── SECTION 1 RESULTS — right after its input ── -->
+  <div id="results-s1" style="display:none">
+    <div class="section-title" style="margin-top:0" id="spotSection">
+      Section 1 — Spot Book Risk
+    </div>
+    <div class="var-card" id="spotCard" style="display:none">
+      <div class="var-card-label">
+        <span id="rCashHorizon"></span>-Day FX Value at Risk · Cash Positions ·
+        <span id="rConfidence"></span> Confidence
+      </div>
+      <div class="var-headline">
+        <span class="ccy" id="rBaseCcy"></span><span id="rSpotVaR"></span>
+      </div>
+      <p class="var-subtext" id="rSpotInterp"></p>
+      <div class="risk-badge" id="rBadge">
+        <div class="risk-dot"></div>
+        <span id="rBadgeText"></span>
+      </div>
+      <div class="warn-box" id="rWarnBox"></div>
+      <div id="rSpotCov" style="display:none;font-family:var(--mono);font-size:11px;
+           color:var(--hedge);margin-top:8px;padding:6px 10px;
+           background:rgba(167,139,250,0.08);border-radius:4px;
+           border:1px solid rgba(167,139,250,0.2)">
+      </div>
+    </div>
+    <div class="breakdown-grid" id="spotBreakdown"></div>
+  </div>
+
   <!-- ── FUTURE EXPOSURES ── -->
-  <div class="section-title">Future Exposures</div>
+  <div class="section-title" style="margin-top:32px">Future Exposures</div>
   <div class="table-wrapper">
     <table>
       <thead>
@@ -702,91 +744,51 @@
   </div>
   <div class="error-box" id="errorBox"></div>
 
-  <!-- ── RESULTS ── -->
-  <div id="results">
+  <!-- ── SECTION 2 RESULTS — after calculate button ── -->
+  <div id="results-s2" style="display:none">
 
     <!-- Partial fetch errors -->
     <div class="fetch-errors" id="fetchErrors"></div>
 
-    <!-- ── LAYER 1a: SPOT RISK ── -->
-    <div class="section-title" style="margin-top:0" id="spotSection">
-      Layer 1a — Spot Risk
-    </div>
-    <div class="var-card" id="spotCard" style="display:none">
-      <div class="var-card-label">
-        <span id="rCashHorizon"></span>-Day FX Value at Risk · Cash Positions ·
-        <span id="rConfidence"></span> Confidence
-      </div>
-      <div class="var-headline">
-        <span class="ccy" id="rBaseCcy"></span><span id="rSpotVaR"></span>
-      </div>
-      <p class="var-subtext" id="rSpotInterp"></p>
-      <div class="risk-badge" id="rBadge">
-        <div class="risk-dot"></div>
-        <span id="rBadgeText"></span>
-      </div>
-      <div class="warn-box" id="rWarnBox"></div>
-    </div>
-    <div class="breakdown-grid" id="spotBreakdown"></div>
-
-    <!-- ── LAYER 1b & 2: FORWARD BUCKETS ── -->
+    <!-- ── SECTION 2: UNIFIED BUCKETED RISK ── -->
     <div class="section-title" style="margin-top:32px" id="fwdSection">
-      Layer 1b &amp; 2 — Forward Risk
+      Section 2 — Unified Bucketed Risk
+    </div>
+    <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:16px;line-height:1.6">
+      Cash holdings (from Section 1) are treated as long positions in Bucket 1, where they net
+      against same-currency near-term payables. Forward exposures sit in their natural bucket by
+      settlement date. Within each bucket, positions in the same currency are netted first
+      (natural hedge benefit), then the remaining net positions across currencies are combined
+      using a covariance matrix (diversification benefit). Each bucket VaR uses its own time
+      horizon T and cannot be summed across buckets.
     </div>
     <div id="bucketContainer"></div>
     <div class="no-total-notice" id="noTotalNotice" style="display:none">
-      ⓘ  No combined forward total is shown. Each bucket uses a different
-      time horizon T — Bucket 2 uses T=42 days, Bucket 3 uses T=95 days, etc.
-      Adding them together would conflate risks over different time windows
-      and produce a misleading single number. Each bucket VaR is meaningful
-      and actionable within its own settlement window.
+      ⓘ  Cash positions appear in Bucket 1 as synthetic receivables and net
+      against same-currency near-term obligations. No combined total across
+      buckets — each bucket uses a different time horizon T. Each bucket VaR
+      is meaningful and actionable within its own settlement window.
     </div>
-
-    <!-- ── LAYER 3: NET CURRENCY SUMMARY ── -->
-    <div class="section-title" style="margin-top:32px" id="netSection">
-      Layer 3 — Net Currency Summary
-    </div>
-    <div style="margin-bottom:8px; font-family:var(--mono); font-size:11px; color:var(--muted);">
-      Informational only. Combines cash + receivables − payables per currency.
-      Not used for VaR — different horizons make netting for risk purposes ambiguous.
-    </div>
-    <table class="net-summary-table" id="netSummaryTable">
-      <thead>
-        <tr>
-          <th>Currency</th>
-          <th>Cash</th>
-          <th>Receivables</th>
-          <th>Payables</th>
-          <th>Net Position</th>
-          <th>Direction</th>
-        </tr>
-      </thead>
-      <tbody id="netSummaryBody"></tbody>
-    </table>
 
     <!-- ── ASSUMPTIONS ── -->
     <div class="assumptions">
-      <strong>Model — Full Parametric (Delta-Normal) VaR, V2</strong><br><br>
-      <strong>Spot Risk:</strong> Cash positions use a user-specified horizon T.
-      σ_T = σ_annual × √(T/252); μ_T = μ_daily × T.
-      VaR = E × (Z_α × σ_T − μ_T) for long (cash/receivable),
-      VaR = E × (Z_α × σ_T + μ_T) for short (payable).<br><br>
-      <strong>Forward Risk:</strong> Each exposure's horizon T = trading days from
-      today to settlement date. Exposures are grouped into time buckets (0–1mo,
-      1–3mo, 3–6mo, 6–12mo, >12mo) and netted within each bucket/currency.
-      VaR is computed on the net notional using the bucket midpoint T.<br><br>
-      <strong>Natural Hedging Benefit:</strong> Within each bucket/currency group,
-      gross VaR (sum of standalone VaRs at bucket T) minus net VaR (VaR on net
-      notional). Both computed at the same bucket T so the difference is purely
-      from netting. A positive benefit means offsetting positions reduced risk.<br><br>
-      <strong>Limitations:</strong> Normality assumption; historical (backward-looking)
-      volatility; simple sum across currencies within each bucket (assumes perfect
-      correlation); natural hedging only within forward buckets (cash vs forward
-      netting requires treasury policy assumptions and is left for V2.3+).
-      Monte Carlo with Student's t for fat tails planned for V3.
+      <strong>Model — Full Parametric (Delta-Normal) VaR, V2.2/2.3</strong><br><br>
+      <strong>Section 1 — Spot Book:</strong> Standalone VaR on cash holdings at user-specified
+      T. σ_T = σ_annual × √(T/252); μ_T = μ_daily × T.
+      VaR = E × (Z_α × σ_T − μ_T) for long positions (cash, receivables);
+      VaR = E × (Z_α × σ_T + μ_T) for short positions (payables).<br><br>
+      <strong>Section 2 — Unified Bucketed:</strong> Cash holdings are treated as long positions
+      in Bucket 1, where they net against same-currency near-term payables. Forward exposures
+      are bucketed by settlement date. Within each bucket and currency, receivables and payables
+      are netted — the natural hedge benefit is the VaR saved by this netting vs treating each
+      position independently. VaR is computed on the net notional using the bucket midpoint T.<br><br>
+      <strong>Remaining limitations:</strong> Normality assumption understates fat tails for
+      crashing currencies (TRY, ARS) — Monte Carlo with Student's t planned for V3.
+      yfinance is an unofficial data source. No holiday calendar (Mon–Fri only).
+      Bucket midpoint T approximates each exposure's actual settlement T.
     </div>
 
-  </div><!-- /#results -->
+  </div><!-- /#results-s2 -->
 
 </div><!-- /.shell -->
 
@@ -917,7 +919,8 @@ async function calculate() {
   setLoading(true);
   setStatus('Running V2 engine — fetching market data and computing VaR…');
   hideError();
-  document.getElementById('results').style.display = 'none';
+  document.getElementById('results-s1').style.display = 'none';
+  document.getElementById('results-s2').style.display = 'none';
 
   try {
     const resp = await fetch('/calculate', {
@@ -949,14 +952,14 @@ async function calculate() {
 // =============================================================================
 function renderResults(data) {
   const { base_ccy, confidence, cash_horizon,
-          spot_risk, forward_net, net_currency_summary } = data;
+          spot_risk, unified_buckets, gross_attribution } = data;
 
   // Collect all errors
   const allErrors = [
     ...(spot_risk?.errors || []).map(e => `Cash ${e.currency}: ${e.reason}`),
-    ...(data.forward_gross?.errors || []).map(e =>
+    ...(gross_attribution?.errors || []).map(e =>
       `${e.currency} (${e.settlement_date}): ${e.reason}`),
-    ...(forward_net?.errors || []).map(e =>
+    ...(unified_buckets?.errors || []).map(e =>
       `${e.currency || ''} (${e.settlement_date || ''}): ${e.reason || ''}`),
   ];
   const fetchErrBox = document.getElementById('fetchErrors');
@@ -976,16 +979,27 @@ function renderResults(data) {
     document.getElementById('rCashHorizon').textContent = cash_horizon;
     document.getElementById('rConfidence').textContent  = `${Math.round(confidence * 100)}%`;
     document.getElementById('rBaseCcy').textContent     = base_ccy + ' ';
-    document.getElementById('rSpotVaR').textContent     = fmt(spot_risk.total_var);
+
+    // Fix 2: Show covariance-adjusted as the headline when available —
+    // it's the more accurate number. Simple sum shown as reference below.
+    const ben        = spot_risk.diversification_benefit || 0;
+    const hasCov     = ben > 0.01 && spot_risk.total_var_cov != null;
+    const headlineVar = hasCov ? spot_risk.total_var_cov : spot_risk.total_var;
+    document.getElementById('rSpotVaR').textContent = fmt(headlineVar);
 
     const totalExp = spot_risk.positions.reduce((s, p) => s + p.exposure_base, 0);
-    const pct = totalExp > 0 ? spot_risk.total_var / totalExp : 0;
+    const pct = totalExp > 0 ? headlineVar / totalExp : 0;
     document.getElementById('rSpotInterp').innerHTML =
       `<strong>${Math.round(confidence*100)}%</strong> chance of losing no more than
-       <strong>${base_ccy} ${fmt(spot_risk.total_var)}</strong> in
+       <strong>${base_ccy} ${fmt(headlineVar)}</strong> in
        <strong>${cash_horizon}</strong> trading day(s).
        Represents <strong>${(pct*100).toFixed(2)}%</strong> of
        ${base_ccy}-equivalent cash exposure.`;
+
+    // Covariance runs silently — just use the adjusted number as the headline,
+    // no UI explanation needed.
+    const covEl = document.getElementById('rSpotCov');
+    covEl.style.display = 'none';
 
     // Risk badge
     const sqrtT  = Math.sqrt(cash_horizon);
@@ -996,32 +1010,46 @@ function renderResults(data) {
     else if (pct < 0.015 * sqrtT) { badge.classList.add('medium'); btext.textContent = 'Medium Risk'; }
     else                           { badge.classList.add('high');   btext.textContent = 'High Risk';   }
 
-    // Warn box
+    // Warn box — Fix 3: expand drift explanation
     const warnBox  = document.getElementById('rWarnBox');
     const anyDrift = spot_risk.positions.some(p => p.drift_warning);
     const anyFloor = spot_risk.positions.some(p => p.var_was_floored);
     if (anyDrift || anyFloor) {
       warnBox.style.display = 'block';
       const parts = [];
-      if (anyDrift) parts.push('⚠ One or more pairs have annualised drift > ±10%. Full formula (μ ≠ 0) applied. Normality may understate tail risk for crashing currencies.');
-      if (anyFloor) parts.push('⚠ One or more positions had negative raw VaR (floored to 0). Drift in your favour exceeds downside vol at this horizon. Does NOT mean zero risk.');
-      warnBox.textContent = parts.join(' ');
+      if (anyDrift) parts.push(
+        '⚠ Significant drift detected on one or more currency pairs (annualised mean > ±10%). ' +
+        'Drift is the historical daily mean return of the exchange rate — when a currency has been ' +
+        'consistently trending (e.g. depreciating 8%/yr against your base), the VaR formula ' +
+        'adjusts the expected loss accordingly using the full μ ≠ 0 formula. ' +
+        'At longer horizons the drift term compounds and can dominate the volatility term. ' +
+        'Be aware that past trend does not guarantee future direction — normality may also ' +
+        'understate tail risk for strongly trending or crashing currencies.'
+      );
+      if (anyFloor) parts.push(
+        '⚠ One or more positions had negative raw VaR (floored to 0). This means the historical ' +
+        'drift in your favour (currency appreciating toward you) exceeds the downside volatility ' +
+        'at this horizon. This does NOT mean zero risk — a sudden trend reversal is not captured.'
+      );
+      warnBox.innerHTML = parts.join('<br><br>');
     } else {
       warnBox.style.display = 'none';
     }
 
-    // Per-position breakdown
+    // Per-position breakdown — Fix 3: drift label now includes tooltip context
     const grid = document.getElementById('spotBreakdown');
     grid.innerHTML = '';
     for (const p of spot_risk.positions) {
-      const share = spot_risk.total_var > 0 ? (p.var / spot_risk.total_var * 100) : 0;
+      const share = spot_risk.total_var > 0 ? (p.var / headlineVar * 100) : 0;
+      const driftTitle = 'Drift = historical mean daily return of this exchange rate, annualised. ' +
+        'When large, the VaR formula adjusts for the expected directional move.';
       const driftFlag = p.drift_warning
-        ? `<span style="color:var(--warn);font-size:10px"> ⚠ drift ${(p.annualised_mean*100).toFixed(1)}%/yr</span>`
-        : `<span style="color:var(--muted);font-size:10px"> drift ${(p.annualised_mean*100).toFixed(2)}%/yr</span>`;
+        ? `<span style="color:var(--warn);font-size:10px" title="${driftTitle}"> ⚠ drift ${(p.annualised_mean*100).toFixed(1)}%/yr — trending</span>`
+        : `<span style="color:var(--muted);font-size:10px" title="${driftTitle}"> drift ${(p.annualised_mean*100).toFixed(2)}%/yr</span>`;
       const crossNote = p.used_cross_rate
         ? `<span style="color:var(--muted);font-size:10px;display:block">via USD cross-rate</span>` : '';
       const floorNote = p.var_was_floored
-        ? `<span style="color:var(--warn);font-size:10px;display:block">Raw VaR: ${base_ccy} -${fmt(Math.abs(p.var_raw))} (floored)</span>` : '';
+        ? `<span style="color:var(--warn);font-size:10px;display:block">Raw VaR: ${base_ccy} -${fmt(Math.abs(p.var_raw))} (floored to 0)</span>` : '';
       const row = document.createElement('div');
       row.className = 'breakdown-row';
       row.innerHTML = `
@@ -1041,19 +1069,24 @@ function renderResults(data) {
     }
   }
 
-  // ── Layer 1b & 2: Forward buckets ────────────────────────────────────────
+  // ── Section 2: Unified Bucketed Risk ────────────────────────────────────
   const container = document.getElementById('bucketContainer');
   container.innerHTML = '';
 
-  const hasBuckets = forward_net?.buckets?.length > 0;
+  const hasBuckets = unified_buckets?.buckets?.length > 0;
   document.getElementById('noTotalNotice').style.display = hasBuckets ? 'block' : 'none';
 
   if (hasBuckets) {
-    for (const bucket of forward_net.buckets) {
+    for (const bucket of unified_buckets.buckets) {
       const card = document.createElement('div');
       card.className = 'bucket-card';
 
-      // Bucket header
+      // Covariance runs silently — bucket_var is already the accurate figure
+      const bvCov = bucket.bucket_var;
+
+      // Fix 1: detect if this bucket contains cash positions
+      const hasCashInBucket = bucket.currencies.some(c => c.positions.some(p => p.source === 'cash'));
+
       card.innerHTML = `
         <div class="bucket-header">
           <div class="bucket-header-left">
@@ -1063,9 +1096,17 @@ function renderResults(data) {
           </div>
           <div style="text-align:right">
             <div class="bucket-total-label">Bucket VaR</div>
-            <div class="bucket-total">${base_ccy} ${fmt(bucket.bucket_var)}</div>
+            <div class="bucket-total">${base_ccy} ${fmt(bvCov)}</div>
           </div>
         </div>
+        ${hasCashInBucket ? `
+          <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+               padding:6px 16px;border-bottom:1px solid rgba(255,255,255,0.06);
+               background:rgba(255,255,255,0.02)">
+            ↑ Your cash holdings appear here as synthetic long positions (T=10 days).
+            They net against any same-currency near-term payables in this window.
+            For standalone cash VaR at your chosen horizon, see Section 1 above.
+          </div>` : ''}
       `;
 
       // Per-currency rows
@@ -1095,26 +1136,39 @@ function renderResults(data) {
             </div>`;
         }
 
-        // Attribution (when multiple positions or flat)
-        let attrHtml = '';
-        if (ccy.positions.length > 1 || ccy.net_direction === 'flat') {
-          const rows = ccy.positions.map(pos => {
-            const isRecv = pos.direction === 'receivable';
-            return `
-              <div class="attr-row">
-                <span class="attr-arrow ${isRecv ? 'recv' : 'pay'}">${isRecv ? '→' : '←'}</span>
-                <span class="attr-dir">${pos.direction}</span>
-                <span class="attr-amt">${pos.currency} ${fmtC(pos.amount)}</span>
-                <span class="attr-date">${pos.settlement_date}</span>
-                <span class="attr-var">${base_ccy} ${fmt(pos.standalone_var_at_bucket_t)}</span>
-              </div>`;
-          }).join('');
-          attrHtml = `
-            <div class="attribution">
-              <div class="attr-label">Attribution at T=${bucket.midpoint_days} days</div>
-              ${rows}
+        // Attribution — always shown, sorted by standalone VaR descending
+        // so the biggest risk driver appears at the top
+        const sortedPositions = [...ccy.positions].sort(
+          (a, b) => b.standalone_var_at_bucket_t - a.standalone_var_at_bucket_t
+        );
+        const grossVar = ccy.gross_var_at_bucket_t || 1;
+        const rows = sortedPositions.map(pos => {
+          const isRecv  = pos.direction === 'receivable';
+          const isCash  = pos.source === 'cash';
+          const dateStr = isCash
+            ? `<span style="color:var(--accent);font-size:10px">[cash holding]</span>`
+            : pos.settlement_date;
+          const share   = grossVar > 0
+            ? (pos.standalone_var_at_bucket_t / grossVar * 100).toFixed(1) : 0;
+          return `
+            <div class="attr-row">
+              <span class="attr-arrow ${isRecv ? 'recv' : 'pay'}">${isRecv ? '→' : '←'}</span>
+              <span class="attr-dir">${isCash ? 'cash' : pos.direction}</span>
+              <span class="attr-amt">${pos.currency} ${fmtC(pos.amount)}</span>
+              <span class="attr-date">${dateStr}</span>
+              <span class="attr-var">
+                ${base_ccy} ${fmt(pos.standalone_var_at_bucket_t)}
+                <div class="bd-bar-wrap" style="margin-top:3px">
+                  <div class="bd-bar-fill" style="width:${share}%"></div>
+                </div>
+              </span>
             </div>`;
-        }
+        }).join('');
+        const attrHtml = `
+          <div class="attribution">
+            <div class="attr-label">Attribution at T=${bucket.midpoint_days} days — sorted by risk</div>
+            ${rows}
+          </div>`;
 
         const ccyRow = document.createElement('div');
         ccyRow.className = 'ccy-row';
@@ -1148,34 +1202,8 @@ function renderResults(data) {
     }
   }
 
-  // ── Layer 3: Net currency summary ────────────────────────────────────────
-  const tbody = document.getElementById('netSummaryBody');
-  tbody.innerHTML = '';
-
-  for (const row of (net_currency_summary || [])) {
-    const dirClass = row.net_direction === 'long'  ? 'net-val-positive'
-                   : row.net_direction === 'short' ? 'net-val-negative'
-                   :                                  'net-val-flat';
-    const dirLabel = row.net_direction === 'long'  ? '▲ Long'
-                   : row.net_direction === 'short' ? '▼ Short'
-                   :                                  '— Flat';
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td style="font-family:var(--mono);color:var(--accent);font-weight:500">
-        ${row.currency}
-      </td>
-      <td>${row.cash_base > 0 ? `+${base_ccy} ${fmtC(row.cash_base)}` : '—'}</td>
-      <td>${row.receivables_base > 0 ? `+${base_ccy} ${fmtC(row.receivables_base)}` : '—'}</td>
-      <td>${row.payables_base > 0 ? `−${base_ccy} ${fmtC(row.payables_base)}` : '—'}</td>
-      <td class="${dirClass}">${base_ccy} ${fmt(row.net_base)}</td>
-      <td class="${dirClass}" style="font-family:var(--mono);font-size:11px">
-        ${dirLabel}
-      </td>
-    `;
-    tbody.appendChild(tr);
-  }
-
-  document.getElementById('results').style.display = 'block';
+  document.getElementById('results-s1').style.display = 'block';
+  document.getElementById('results-s2').style.display = 'block';
 }
 
 // =============================================================================
