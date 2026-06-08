@@ -11,14 +11,19 @@ Architecture note:
   Monte Carlo simulation for V3, or swapping yfinance for a live data vendor),
   only this file changes. The Flask app and the HTML frontend are unaffected.
 
-V2 change (minimal):
+V2 change:
   calculate_parametric_var() gained a 'direction' parameter ('long' or 'short')
-  to correctly handle future payables, where the risk direction is flipped —
-  the holder fears FCY appreciation rather than depreciation. All existing V1
-  callers are unaffected since 'long' remains the default.
-  All other functions (fetch_pair_returns, calculate_portfolio_var, etc.) are
-  unchanged from V1. Future exposure logic lives in exposure_engine.py, which
-  imports from this module but is never imported by it.
+  to correctly handle future payables. All existing V1 callers are unaffected
+  since 'long' remains the default.
+
+V2.2 additions:
+  build_correlation_matrix(): builds a PSD Pearson correlation matrix from
+  historical return series, used for cross-currency covariance adjustment.
+  calculate_portfolio_var_cov(): computes portfolio VaR using the delta-normal
+  covariance formula Z × √(sᵀ Σ_T s) − portfolio_drift_T, replacing the
+  simple-sum (perfect correlation) assumption with actual historical correlations.
+  Both are called by exposure_engine.py — var_engine.py remains unaware of
+  Flask, HTML, or exposure logic.
 """
 
 import numpy as np
@@ -395,9 +400,12 @@ def calculate_portfolio_var(
     Aggregation method: SIMPLE SUM of per-position VaRs.
     This assumes perfect positive correlation across all currency pairs —
     i.e. on the worst day, every foreign currency moves against the base
-    simultaneously. This is conservative (overstates true portfolio risk)
-    but transparent and appropriate for a PoC. Correlation-adjusted
-    aggregation via a covariance matrix is planned for V2.
+    simultaneously. This is conservative (overstates true portfolio risk).
+
+    V2.2 note: covariance-adjusted aggregation is applied on top of this
+    function's output by _add_covariance_to_spot_risk() in exposure_engine.py,
+    which adds 'total_var_cov' and 'diversification_benefit' to the returned
+    dict. This function's 'total_var' remains the simple sum for transparency.
 
     Args:
         positions: List of dicts, each with:

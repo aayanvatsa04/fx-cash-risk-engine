@@ -707,11 +707,12 @@
         <span id="rBadgeText"></span>
       </div>
       <div class="warn-box" id="rWarnBox"></div>
-      <div id="rSpotCov" style="display:none;font-family:var(--mono);font-size:11px;
-           color:var(--hedge);margin-top:8px;padding:6px 10px;
-           background:rgba(167,139,250,0.08);border-radius:4px;
-           border:1px solid rgba(167,139,250,0.2)">
+      <div id="rPortfolioNote" style="display:none;font-family:var(--mono);font-size:11px;
+           color:var(--muted);margin-top:10px;padding:6px 10px;
+           background:rgba(255,255,255,0.03);border-radius:4px;
+           border:1px solid rgba(255,255,255,0.08);line-height:1.6">
       </div>
+      <div id="rSpotCov" style="display:none"></div>
     </div>
     <div class="breakdown-grid" id="spotBreakdown"></div>
   </div>
@@ -995,6 +996,20 @@ function renderResults(data) {
        <strong>${cash_horizon}</strong> trading day(s).
        Represents <strong>${(pct*100).toFixed(2)}%</strong> of
        ${base_ccy}-equivalent cash exposure.`;
+
+    // Portfolio correlation note — explains why headline < sum of individual figures
+    const noteEl = document.getElementById('rPortfolioNote');
+    if (hasCov && spot_risk.positions.length > 1) {
+      const simpleSum = spot_risk.total_var;
+      noteEl.style.display = 'block';
+      noteEl.innerHTML =
+        `Individual figures show each currency's standalone risk in isolation. ` +
+        `Portfolio total accounts for correlations between currencies — ` +
+        `they don't all move against you simultaneously. ` +
+        `Simple sum would be <strong>${base_ccy} ${fmt(simpleSum)}</strong>.`;
+    } else {
+      noteEl.style.display = 'none';
+    }
 
     // Covariance runs silently — just use the adjusted number as the headline,
     // no UI explanation needed.
