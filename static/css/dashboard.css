@@ -1,0 +1,810 @@
+/*
+  dashboard.css — FX Risk Dashboard Styles
+  
+  Design language deliberately matches calculator.html:
+    - Same dark-terminal colour palette (--bg, --surface, --border, etc.)
+    - Same font stack: DM Mono (data/numbers), Instrument Serif (display), DM Sans (body)
+    - Same accent colour: --accent #4ade80 (green)
+    - Same hedge colour:  --hedge  #a78bfa (purple)
+  
+  New additions for the dashboard:
+    - --long:   #4ade80  (green  — net long exposure / receivable)
+    - --short:  #f87171  (red    — net short exposure / payable)
+    - --cfar:   #60a5fa  (blue   — CFaR annotation on bars)
+    - --teal:   #2dd4bf  (teal   — diversification / risk reduction)
+    - Slider track/thumb styling
+    - Stat card grid
+    - Chart container with responsive height
+    - Hedge effectiveness table
+  
+  Future developers: all colours are CSS custom properties defined in :root.
+  To retheme, change the :root block only — nothing else needs touching.
+*/
+
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500&display=swap');
+
+/* ============================================================
+   DESIGN TOKENS — match calculator.html :root exactly
+   ============================================================ */
+:root {
+  /* Backgrounds */
+  --bg:         #0d0f12;
+  --surface:    #13161b;
+  --surface2:   #1a1e25;
+
+  /* Borders */
+  --border:     #252a33;
+  --border2:    #2e3440;
+
+  /* Text */
+  --text:       #e8eaf0;
+  --muted:      #6b7280;
+
+  /* Semantic colours */
+  --accent:     #4ade80;   /* green  — primary accent, positive */
+  --warn:       #fbbf24;   /* amber  — warning */
+  --danger:     #f87171;   /* red    — risk / payable / short */
+  --info:       #60a5fa;   /* blue   — CFaR annotation */
+  --hedge:      #a78bfa;   /* purple — natural hedge benefit */
+  --teal:       #2dd4bf;   /* teal   — diversification / reduction */
+
+  /* Dashboard-specific chart colours */
+  --long:       #4ade80;   /* bar fill — net long (receivable) */
+  --short:      #f87171;   /* bar fill — net short (payable) */
+  --flat:       #6b7280;   /* bar fill — net flat (perfectly hedged) */
+
+  /* Font families */
+  --mono:       'DM Mono', monospace;
+  --serif:      'Instrument Serif', serif;
+  --sans:       'DM Sans', sans-serif;
+}
+
+/* ============================================================
+   RESET & BASE
+   ============================================================ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background:  var(--bg);
+  color:       var(--text);
+  font-family: var(--sans);
+  font-size:   14px;
+  line-height: 1.6;
+  min-height:  100vh;
+}
+
+/* ============================================================
+   LAYOUT SHELL
+   ============================================================ */
+.shell {
+  max-width:  1100px;   /* wider than calculator.html (900px) to accommodate chart */
+  margin:     0 auto;
+  padding:    48px 24px 96px;
+}
+
+/* ============================================================
+   HEADER — identical pattern to calculator.html
+   ============================================================ */
+header {
+  margin-bottom: 48px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 32px;
+}
+
+.header-label {
+  font-family:    var(--mono);
+  font-size:      11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color:          var(--accent);
+  margin-bottom:  10px;
+}
+
+header h1 {
+  font-family: var(--serif);
+  font-size:   36px;
+  font-weight: 400;
+  line-height: 1.15;
+}
+
+header h1 em { font-style: italic; color: var(--muted); }
+
+.header-sub {
+  margin-top: 10px;
+  color:      var(--muted);
+  font-size:  13px;
+  max-width:  580px;
+}
+
+.nav-link {
+  display:         inline-flex;
+  align-items:     center;
+  gap:             6px;
+  font-family:     var(--mono);
+  font-size:       11px;
+  letter-spacing:  0.08em;
+  color:           var(--muted);
+  text-decoration: none;
+  padding:         6px 12px;
+  border:          1px solid var(--border);
+  border-radius:   4px;
+  margin-top:      16px;
+  transition:      border-color 0.15s, color 0.15s;
+}
+.nav-link:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ============================================================
+   INPUT FORM PANEL
+   ============================================================ */
+.form-panel {
+  background:    var(--surface);
+  border:        1px solid var(--border);
+  border-radius: 8px;
+  padding:       28px 32px;
+  margin-bottom: 40px;
+}
+
+.form-panel h2 {
+  font-family:   var(--mono);
+  font-size:     12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color:         var(--muted);
+  margin-bottom: 20px;
+}
+
+/* Two-column form grid for settings */
+.form-grid-2 {
+  display:               grid;
+  grid-template-columns: 1fr 1fr;
+  gap:                   16px;
+  margin-bottom:         16px;
+}
+
+/* Full-width textarea row */
+.form-row { margin-bottom: 16px; }
+
+label {
+  display:       block;
+  font-family:   var(--mono);
+  font-size:     11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color:         var(--muted);
+  margin-bottom: 6px;
+}
+
+input[type="text"],
+input[type="number"],
+textarea,
+select {
+  width:         100%;
+  background:    var(--surface2);
+  border:        1px solid var(--border2);
+  border-radius: 4px;
+  color:         var(--text);
+  font-family:   var(--mono);
+  font-size:     13px;
+  padding:       8px 12px;
+  transition:    border-color 0.15s;
+  outline:       none;
+}
+input:focus, textarea:focus, select:focus {
+  border-color: var(--accent);
+}
+textarea {
+  resize:      vertical;
+  min-height:  80px;
+  font-size:   12px;
+  line-height: 1.5;
+}
+
+.hint {
+  font-size:  11px;
+  color:      var(--muted);
+  margin-top: 5px;
+}
+
+/* Run button */
+.btn-run {
+  display:         inline-flex;
+  align-items:     center;
+  gap:             8px;
+  background:      var(--accent);
+  color:           #0d0f12;
+  font-family:     var(--mono);
+  font-size:       12px;
+  font-weight:     500;
+  letter-spacing:  0.08em;
+  text-transform:  uppercase;
+  border:          none;
+  border-radius:   4px;
+  padding:         10px 24px;
+  cursor:          pointer;
+  transition:      opacity 0.15s;
+}
+.btn-run:hover   { opacity: 0.85; }
+.btn-run:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Spinner inside button (shown during loading) */
+.spinner {
+  width:         14px;
+  height:        14px;
+  border:        2px solid rgba(0,0,0,0.3);
+  border-top-color: #0d0f12;
+  border-radius: 50%;
+  animation:     spin 0.7s linear infinite;
+  display:       none;
+}
+.btn-run.loading .spinner { display: block; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Error banner */
+.error-banner {
+  background:    rgba(248, 113, 113, 0.08);
+  border:        1px solid rgba(248, 113, 113, 0.3);
+  border-radius: 6px;
+  color:         var(--danger);
+  font-family:   var(--mono);
+  font-size:     12px;
+  padding:       12px 16px;
+  margin-top:    16px;
+  display:       none;
+}
+.error-banner.visible { display: block; }
+
+/* ============================================================
+   RESULTS SECTION (hidden until data is loaded)
+   ============================================================ */
+#results { display: none; }
+#results.visible { display: block; }
+
+/* ============================================================
+   STAT CARDS — top-of-dashboard headline numbers
+   ============================================================ */
+.stat-grid {
+  display:               grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap:                   16px;
+  margin-bottom:         40px;
+}
+
+.stat-card {
+  background:    var(--surface);
+  border:        1px solid var(--border);
+  border-radius: 8px;
+  padding:       20px 24px;
+  position:      relative;
+  overflow:      hidden;
+}
+
+/* Coloured left-border accent per card type */
+.stat-card::before {
+  content:  '';
+  position: absolute;
+  left:     0;
+  top:      0;
+  bottom:   0;
+  width:    3px;
+}
+.stat-card.accent-green::before  { background: var(--accent); }
+.stat-card.accent-blue::before   { background: var(--info); }
+.stat-card.accent-teal::before   { background: var(--teal); }
+.stat-card.accent-purple::before { background: var(--hedge); }
+
+.stat-label {
+  font-family:    var(--mono);
+  font-size:      10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color:          var(--muted);
+  margin-bottom:  8px;
+}
+
+.stat-value {
+  font-family: var(--mono);
+  font-size:   28px;
+  font-weight: 500;
+  line-height: 1;
+  color:       var(--text);
+  /* tabular-nums ensures digits are all same width — crucial for financial figures */
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-value .ccy {
+  font-size: 13px;
+  color:     var(--muted);
+  margin-right: 4px;
+}
+
+.stat-sub {
+  font-family: var(--mono);
+  font-size:   11px;
+  color:       var(--muted);
+  margin-top:  6px;
+}
+
+/* Tooltip icon on stat cards (for methodology disclosure) */
+.tooltip-icon {
+  position:    absolute;
+  top:         14px;
+  right:       14px;
+  width:       18px;
+  height:      18px;
+  border:      1px solid var(--border2);
+  border-radius: 50%;
+  font-family: var(--mono);
+  font-size:   10px;
+  color:       var(--muted);
+  display:     flex;
+  align-items: center;
+  justify-content: center;
+  cursor:      help;
+}
+.tooltip-icon:hover::after {
+  content:     attr(data-tip);
+  position:    absolute;
+  top:         24px;
+  right:       0;
+  width:       280px;
+  background:  var(--surface2);
+  border:      1px solid var(--border2);
+  border-radius: 6px;
+  color:       var(--muted);
+  font-size:   11px;
+  line-height: 1.5;
+  padding:     10px 12px;
+  z-index:     10;
+  white-space: normal;
+  pointer-events: none;
+}
+
+/* ============================================================
+   CHART SECTION
+   ============================================================ */
+.chart-section {
+  background:    var(--surface);
+  border:        1px solid var(--border);
+  border-radius: 8px;
+  padding:       24px 28px;
+  margin-bottom: 32px;
+}
+
+.chart-header {
+  display:         flex;
+  align-items:     center;
+  justify-content: space-between;
+  margin-bottom:   20px;
+  flex-wrap:       wrap;
+  gap:             12px;
+}
+
+.chart-title {
+  font-family:   var(--serif);
+  font-size:     20px;
+  font-weight:   400;
+}
+
+.chart-title .sub {
+  font-family: var(--sans);
+  font-size:   12px;
+  color:       var(--muted);
+  font-style:  italic;
+  margin-left: 8px;
+}
+
+/* Bucket filter dropdown */
+.bucket-select {
+  background:    var(--surface2);
+  border:        1px solid var(--border2);
+  border-radius: 4px;
+  color:         var(--text);
+  font-family:   var(--mono);
+  font-size:     12px;
+  padding:       6px 10px;
+  cursor:        pointer;
+  width:         auto;   /* override the full-width default for form selects */
+}
+
+/* Chart canvas container — responsive height */
+.chart-container {
+  position:       relative;
+  height:         320px;
+}
+
+/* Chart legend (custom — below the chart) */
+.chart-legend {
+  display:         flex;
+  align-items:     center;
+  gap:             20px;
+  margin-top:      16px;
+  flex-wrap:       wrap;
+}
+.legend-item {
+  display:     flex;
+  align-items: center;
+  gap:         6px;
+  font-family: var(--mono);
+  font-size:   11px;
+  color:       var(--muted);
+}
+.legend-dot {
+  width:         10px;
+  height:        10px;
+  border-radius: 2px;
+  flex-shrink:   0;
+}
+
+/* Empty chart state */
+.chart-empty {
+  display:         flex;
+  align-items:     center;
+  justify-content: center;
+  height:          240px;
+  color:           var(--muted);
+  font-family:     var(--mono);
+  font-size:       13px;
+}
+
+/* ============================================================
+   BUCKET INFO STRIP — shown below chart
+   ============================================================ */
+.bucket-info {
+  display:   grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap:       1px;
+  background: var(--border);
+  border:    1px solid var(--border);
+  border-radius: 6px;
+  overflow:  hidden;
+  margin-top: 20px;
+}
+.bucket-info-cell {
+  background:  var(--surface2);
+  padding:     14px 16px;
+  text-align:  center;
+}
+.bucket-info-cell .bi-label {
+  font-family:    var(--mono);
+  font-size:      10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color:          var(--muted);
+  margin-bottom:  4px;
+}
+.bucket-info-cell .bi-value {
+  font-family:          var(--mono);
+  font-size:            16px;
+  font-variant-numeric: tabular-nums;
+}
+.bi-value.green  { color: var(--accent); }
+.bi-value.blue   { color: var(--info); }
+.bi-value.purple { color: var(--hedge); }
+.bi-value.teal   { color: var(--teal); }
+
+/* ============================================================
+   SIMULATION PANEL
+   ============================================================ */
+.sim-panel {
+  background:    var(--surface);
+  border:        1px solid var(--border);
+  border-radius: 8px;
+  padding:       24px 28px;
+  margin-bottom: 32px;
+}
+
+.sim-panel h3 {
+  font-family:    var(--mono);
+  font-size:      11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color:          var(--muted);
+  margin-bottom:  20px;
+}
+
+.sim-grid {
+  display:               grid;
+  grid-template-columns: 1fr 1fr;
+  gap:                   32px;
+}
+
+@media (max-width: 640px) {
+  .sim-grid { grid-template-columns: 1fr; }
+}
+
+.sim-block h4 {
+  font-family:   var(--mono);
+  font-size:     12px;
+  color:         var(--text);
+  margin-bottom: 8px;
+}
+
+.sim-block p.sim-desc {
+  font-size:   12px;
+  color:       var(--muted);
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
+/* Currency picker for the spot slider */
+.currency-picker {
+  display:       flex;
+  align-items:   center;
+  gap:           10px;
+  margin-bottom: 14px;
+}
+.currency-picker label {
+  margin:        0;
+  font-size:     11px;
+  white-space:   nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.currency-picker select {
+  width:  auto;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+/* Slider row */
+.slider-row {
+  display:     flex;
+  align-items: center;
+  gap:         12px;
+}
+
+.slider-label {
+  font-family:   var(--mono);
+  font-size:     10px;
+  color:         var(--muted);
+  white-space:   nowrap;
+  min-width:     32px;
+  text-align:    center;
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance:         none;
+  flex:               1;
+  height:             4px;
+  background:         var(--border2);
+  border-radius:      2px;
+  outline:            none;
+  cursor:             pointer;
+}
+/* Thumb styling (cross-browser) */
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width:              16px;
+  height:             16px;
+  background:         var(--accent);
+  border-radius:      50%;
+  border:             2px solid var(--bg);
+  cursor:             pointer;
+}
+input[type="range"]::-moz-range-thumb {
+  width:         16px;
+  height:        16px;
+  background:    var(--accent);
+  border-radius: 50%;
+  border:        2px solid var(--bg);
+  cursor:        pointer;
+}
+
+/* Current slider value readout */
+.slider-value {
+  font-family:          var(--mono);
+  font-size:            13px;
+  font-weight:          500;
+  color:                var(--text);
+  font-variant-numeric: tabular-nums;
+  min-width:            48px;
+  text-align:           right;
+}
+
+/* Note under simulations */
+.sim-note {
+  font-size:  11px;
+  color:      var(--muted);
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  line-height: 1.6;
+}
+
+/* ============================================================
+   HEDGE EFFECTIVENESS TABLE
+   ============================================================ */
+.hedge-section {
+  background:    var(--surface);
+  border:        1px solid var(--border);
+  border-radius: 8px;
+  padding:       24px 28px;
+  margin-bottom: 32px;
+}
+
+.hedge-section h3 {
+  font-family:    var(--mono);
+  font-size:      11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color:          var(--muted);
+  margin-bottom:  6px;
+}
+
+.hedge-section .section-note {
+  font-size:     12px;
+  color:         var(--muted);
+  margin-bottom: 20px;
+  line-height:   1.5;
+}
+
+table {
+  width:           100%;
+  border-collapse: collapse;
+}
+
+thead th {
+  font-family:    var(--mono);
+  font-size:      10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color:          var(--muted);
+  padding:        8px 12px;
+  text-align:     left;
+  border-bottom:  1px solid var(--border2);
+}
+
+thead th:not(:first-child) { text-align: right; }
+
+tbody tr {
+  border-bottom:  1px solid var(--border);
+  transition:     background 0.1s;
+}
+tbody tr:hover { background: var(--surface2); }
+tbody tr:last-child { border-bottom: none; }
+
+tbody td {
+  font-family:          var(--mono);
+  font-size:            12px;
+  padding:              10px 12px;
+  font-variant-numeric: tabular-nums;
+}
+tbody td:not(:first-child) { text-align: right; }
+
+/* Coloured direction badge */
+.dir-badge {
+  display:       inline-block;
+  font-size:     9px;
+  font-family:   var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding:       2px 6px;
+  border-radius: 3px;
+  margin-left:   6px;
+}
+.dir-badge.long  { background: rgba(74,222,128,0.12); color: var(--accent); }
+.dir-badge.short { background: rgba(248,113,113,0.12); color: var(--danger); }
+.dir-badge.flat  { background: rgba(107,114,128,0.12); color: var(--muted); }
+
+/* Effectiveness bar within the table cell */
+.eff-bar-wrap {
+  display:     flex;
+  align-items: center;
+  gap:         8px;
+  justify-content: flex-end;
+}
+.eff-bar-bg {
+  width:         80px;
+  height:        5px;
+  background:    var(--border2);
+  border-radius: 2px;
+  overflow:      hidden;
+}
+.eff-bar-fill {
+  height:        100%;
+  background:    var(--hedge);
+  border-radius: 2px;
+  transition:    width 0.3s;
+}
+
+/* ============================================================
+   RESPONSIVE ADJUSTMENTS
+   ============================================================ */
+@media (max-width: 768px) {
+  .form-grid-2 { grid-template-columns: 1fr; }
+  .stat-grid   { grid-template-columns: 1fr 1fr; }
+  .shell       { padding: 24px 16px 64px; }
+  .chart-section,
+  .sim-panel,
+  .hedge-section { padding: 16px 18px; }
+}
+
+@media (max-width: 480px) {
+  .stat-grid { grid-template-columns: 1fr; }
+  .stat-value { font-size: 22px; }
+}
+
+/* ============================================================
+   UNIFIED PAGE — additional classes used when dashboard renders
+   inside calculator.html alongside the engine results
+   ============================================================ */
+
+/* Currency prefix label inside stat cards (e.g. "SGD") */
+.dash-ccy {
+  font-size:   13px;
+  color:       var(--muted);
+  margin-right: 4px;
+}
+
+/* Direction badge inside the hedge effectiveness table */
+.dash-dir-badge {
+  display:        inline-block;
+  font-size:      9px;
+  font-family:    var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding:        2px 6px;
+  border-radius:  3px;
+  margin-left:    6px;
+}
+.dash-dir-badge.long  { background: rgba(74,222,128,0.12);  color: var(--accent); }
+.dash-dir-badge.short { background: rgba(248,113,113,0.12); color: var(--danger); }
+.dash-dir-badge.flat  { background: rgba(107,114,128,0.12); color: var(--muted);  }
+
+/* Effectiveness bar wrapper inside table cells */
+.dash-eff-wrap {
+  display:         flex;
+  align-items:     center;
+  gap:             8px;
+  justify-content: flex-end;
+}
+.dash-eff-bg {
+  width:         80px;
+  height:        5px;
+  background:    var(--border2);
+  border-radius: 2px;
+  overflow:      hidden;
+}
+.dash-eff-fill {
+  height:        100%;
+  background:    var(--hedge);
+  border-radius: 2px;
+  transition:    width 0.3s;
+}
+
+/* ⓘ tooltip icon on the risk reduction stat card */
+.dash-tooltip-icon {
+  position:       absolute;
+  top:            14px;
+  right:          14px;
+  width:          18px;
+  height:         18px;
+  border:         1px solid var(--border2);
+  border-radius:  50%;
+  font-family:    var(--mono);
+  font-size:      10px;
+  color:          var(--muted);
+  display:        flex;
+  align-items:    center;
+  justify-content: center;
+  cursor:         help;
+}
+.dash-tooltip-icon:hover::after {
+  content:        attr(data-tip);
+  position:       absolute;
+  top:            24px;
+  right:          0;
+  width:          280px;
+  background:     var(--surface2);
+  border:         1px solid var(--border2);
+  border-radius:  6px;
+  color:          var(--muted);
+  font-size:      11px;
+  line-height:    1.5;
+  padding:        10px 12px;
+  z-index:        10;
+  white-space:    normal;
+  pointer-events: none;
+}

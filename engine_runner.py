@@ -1,10 +1,10 @@
 """
-test_v2_engine.py — Standalone V2 Engine Test Runner
+engine_runner.py — Standalone Engine Runner (V3)
 
 Run this file directly in the terminal to verify the engine output before
-pushing to Render:
+pushing to Render — no Flask server needed:
 
-    python test_v2_engine.py
+    python3 engine_runner.py
 
 === THREE-SECTION OUTPUT ===
 
@@ -34,7 +34,7 @@ Forwards:
   E: recv EUR 1mn  15-Jan-2027  → Bucket 4
 """
 
-from exposure_engine import calculate_combined_var_v2
+from exposure_engine import calculate_fx_var
 
 
 # =============================================================================
@@ -248,6 +248,31 @@ def print_summary_panel(result: dict) -> None:
         print(f"    Total natural hedging benefit (all buckets): "
               f"{base_ccy} {fmt(total_hedge)}")
 
+    # Consolidated VaR (V2.4)
+    cv = result.get('consolidated_var', {})
+    if cv.get('total_var', 0) > 0:
+        print(f"\n    {'─'*55}")
+        print(f"    Consolidated Portfolio VaR (V2.4 — single number):")
+        print(f"      Method: exact individual-position covariance, min(T) cross-terms")
+        print(f"      Positions in matrix: {cv['n_positions']}")
+        print(f"      VaR: {base_ccy} {fmt(cv['total_var'])}", end="")
+        if cv.get('var_was_floored'):
+            print(f"  [floored from {base_ccy} -{fmt(abs(cv['total_var_raw']))}]")
+        else:
+            print()
+        print(f"\n      Individual positions (sorted by size):")
+        for p in cv.get('position_breakdown', []):
+            sign_str  = '+' if p['signed_exposure_base'] > 0 else '-'
+            date_str  = f"  settle {p['settlement_date']}" if p['settlement_date'] else f"  [cash, T={p['t_days']}d]"
+            print(f"        {p['currency']:4}  {p['type']:7}  {p['direction']:12}  "
+                  f"{sign_str}{base_ccy} {fmt(abs(p['signed_exposure_base'])):>14}"
+                  f"  T={p['t_days']:3}d{date_str}")
+
+    print(f"\n    {'─'*55}")
+    print(f"    Note: consolidated VaR < sum of bucket VaRs because:")
+    print(f"      1. Same-currency positions net across ALL buckets simultaneously")
+    print(f"      2. Cross-currency diversification applied to full portfolio")
+
 
 # =============================================================================
 # MAIN TEST RUN
@@ -279,12 +304,12 @@ if __name__ == '__main__':
          'settlement_date': '2027-01-15', 'direction': 'receivable'},
     ]
 
-    print(header("V2 FX VaR ENGINE — TEST OUTPUT"))
+    print(header("V3 FX VaR ENGINE — RUNNER OUTPUT"))
     print(f"\n  Base: {BASE_CCY}  |  Confidence: {CONFIDENCE:.0%}  "
           f"|  Lookback: {PERIOD}  |  Cash Horizon: {CASH_HORIZON}d")
     print(f"  {len(CASH_POSITIONS)} cash positions, {len(EXPOSURES)} forward exposures\n")
 
-    result = calculate_combined_var_v2(
+    result = calculate_fx_var(
         cash_positions = CASH_POSITIONS,
         exposures      = EXPOSURES,
         base_ccy       = BASE_CCY,
@@ -310,4 +335,6 @@ if __name__ == '__main__':
     print("  Verify: Bucket 1 shows cash positions as synthetic receivables.")
     print("  Verify: Bucket 2 USD hedge_benefit > 0 (recv 2mn offset by pay 1mn).")
     print("  Verify: Bucket 2 diversification_benefit > 0 (USD + MYR, 2 currencies).")
+    print("  Verify: consolidated_var < sum of all bucket VaRs.")
+    print("  Verify: consolidated_var position_breakdown shows all individual positions.")
     print(sep('═'))
