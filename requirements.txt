@@ -1,10 +1,11 @@
 # requirements.txt
-# Lists every Python package Railway needs to install before running the app.
-# Railway reads this file automatically — you never need to run pip install manually
-# on the server. Just keep this file up to date and Railway handles the rest.
+# Lists every Python package Render needs to install before running the app.
+# Render reads this file automatically during the build step — you never need to
+# run pip install manually on the server. Just keep this file up to date and
+# Render's build process handles the rest.
 
 flask       # web framework — handles HTTP requests and routes
-gunicorn    # production WSGI server — replaces Flask's dev server on Railway
+gunicorn    # production WSGI server — replaces Flask's dev server on Render
 yfinance    # fetches historical FX data from Yahoo Finance
 numpy       # numerical arrays and matrix operations
 pandas      # data manipulation (DataFrames, time series)

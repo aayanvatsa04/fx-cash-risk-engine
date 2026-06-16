@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FX VaR V2 · Cash & Exposures</title>
+<title>FX VaR V3 · Cash & Exposures</title>
+<link rel="stylesheet" href="/static/css/dashboard.css">
 <style>
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500&display=swap');
 
@@ -65,7 +66,7 @@
     font-size: 13px;
     max-width: 560px;
   }
-  .v2-badge {
+  .version-badge {
     display: inline-block;
     background: rgba(167,139,250,0.12);
     border: 1px solid rgba(167,139,250,0.3);
@@ -598,7 +599,7 @@
   <!-- ── HEADER ── -->
   <header>
     <div class="header-label">Finmo · FX Risk Engine</div>
-    <h1>Cash &amp; Exposure <em>FX VaR</em> <span class="v2-badge">V2</span></h1>
+    <h1>Cash &amp; Exposure <em>FX VaR</em> <span class="version-badge">V3</span></h1>
     <p class="header-sub">
       Enter your cash balances and future payables/receivables. The engine
       computes time-bucketed parametric VaR using historical FX data, with
@@ -683,41 +684,11 @@
     </div>
   </div>
   <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:16px">
-    Sets T for the standalone cash book VaR shown immediately below.
-    Has no effect on forward bucket calculations — each forward exposure
-    uses its own settlement date to determine T.
+    Sets T for the standalone Cash Book VaR shown in results below.
+    Forward bucket calculations use each position's own actual
+    settlement date — this selector has no effect on them.
   </div>
 
-  <!-- ── SECTION 1 RESULTS — right after its input ── -->
-  <div id="results-s1" style="display:none">
-    <div class="section-title" style="margin-top:0" id="spotSection">
-      Section 1 — Spot Book Risk
-    </div>
-    <div class="var-card" id="spotCard" style="display:none">
-      <div class="var-card-label">
-        <span id="rCashHorizon"></span>-Day FX Value at Risk · Cash Positions ·
-        <span id="rConfidence"></span> Confidence
-      </div>
-      <div class="var-headline">
-        <span class="ccy" id="rBaseCcy"></span><span id="rSpotVaR"></span>
-      </div>
-      <p class="var-subtext" id="rSpotInterp"></p>
-      <div class="risk-badge" id="rBadge">
-        <div class="risk-dot"></div>
-        <span id="rBadgeText"></span>
-      </div>
-      <div class="warn-box" id="rWarnBox"></div>
-      <div id="rPortfolioNote" style="display:none;font-family:var(--mono);font-size:11px;
-           color:var(--muted);margin-top:10px;padding:6px 10px;
-           background:rgba(255,255,255,0.03);border-radius:4px;
-           border:1px solid rgba(255,255,255,0.08);line-height:1.6">
-      </div>
-      <div id="rSpotCov" style="display:none"></div>
-    </div>
-    <div class="breakdown-grid" id="spotBreakdown"></div>
-  </div>
-
-  <!-- ── FUTURE EXPOSURES ── -->
   <div class="section-title" style="margin-top:32px">Future Exposures</div>
   <div class="table-wrapper">
     <table>
@@ -745,23 +716,287 @@
   </div>
   <div class="error-box" id="errorBox"></div>
 
-  <!-- ── SECTION 2 RESULTS — after calculate button ── -->
+
+
+  <!-- ══════════════════════════════════════════════════════════
+       RISK DASHBOARD — first results section shown after Calculate.
+       Gives a high-level view (stat cards, chart, simulation, hedge
+       table) before the detailed per-position breakdowns below.
+       Hidden until the first successful /calculate response.
+       All rendering is handled by dashboard.js which listens for
+       the 'varResultReady' custom event fired by the calculate() fn.
+       ══════════════════════════════════════════════════════════ -->
+  <div id="results-dashboard" style="display:none">
+
+    <!-- Divider -->
+    <div style="border-top:1px solid var(--border);margin:40px 0 32px;
+                display:flex;align-items:center;gap:16px">
+      <span style="font-family:var(--mono);font-size:10px;letter-spacing:0.12em;
+                   text-transform:uppercase;color:var(--muted);white-space:nowrap">
+        Risk Dashboard
+      </span>
+      <div style="flex:1;height:1px;background:var(--border)"></div>
+    </div>
+
+    <!-- ── HEADLINE STAT CARDS ── -->
+    <div class="stat-grid" style="margin-bottom:32px">
+
+      <div class="stat-card accent-green">
+        <div class="stat-label">Portfolio VaR (exact)</div>
+        <div class="stat-value" id="dashStatConsolidated">—</div>
+        <div class="stat-sub">Covariance · min(Tᵢ,Tⱼ) cross-horizon</div>
+      </div>
+
+      <div class="stat-card accent-blue">
+        <div class="stat-label">Spot Book VaR</div>
+        <div class="stat-value" id="dashStatSpotBook">—</div>
+        <div class="stat-sub">Cash holdings · covariance-adjusted</div>
+      </div>
+
+      <div class="stat-card" style="border-color:var(--border)">
+        <div class="stat-label">Gross Standalone Risk</div>
+        <div class="stat-value" id="dashStatGross" style="color:var(--danger)">—</div>
+        <div class="stat-sub">Cash + forwards · no netting · no diversification</div>
+      </div>
+
+      <div class="stat-card accent-teal" style="position:relative">
+        <div class="stat-label">Risk Reduction</div>
+        <div class="stat-value" id="dashStatReduction" style="color:var(--teal,#2dd4bf)">—</div>
+        <div class="stat-sub">
+          <span id="dashStatReductionPct" style="color:var(--teal,#2dd4bf)">—</span>
+          · Hedge + diversification (approx.)
+        </div>
+        <div class="dash-tooltip-icon" data-tip="Loading…">ⓘ</div>
+      </div>
+
+    </div>
+
+    <!-- ── CHART SECTION ── -->
+    <div class="chart-section">
+      <div class="chart-header">
+        <div class="chart-title">
+          Net Cashflow Exposure by Currency
+          <span class="sub">Component CFaR printed inside each bar</span>
+          <!-- Tooltip explaining zero net exposure / non-zero CFaR — a common point
+               of confusion that is mathematically correct, not a bug. -->
+          <span class="dash-tooltip-icon" style="margin-left:6px;font-size:11px" data-tip="Component CFaR measures each currency's marginal contribution to total period risk, accounting for portfolio correlations — not its standalone exposure. A currency that hedges others in the portfolio can show low Component CFaR even with large net notional, because its risk is partially offset by other positions in the covariance matrix. This is correct, not a display error. For unhedged standalone risk per individual position, see the Bucketed Risk Detail section below. | A currency can also show zero net exposure but still carry a non-zero Component CFaR when positions settle at different dates. For example, a receivable at T=43 days and a payable at T=100 days cancel in notional but NOT in risk — the payable runs 57 extra days uncovered after the receivable settles. The min(Tᵢ,Tⱼ) covariance formula captures this: cross-term uses min(43,100)=43, so the two positions do not fully offset. Zero-notional labels appear in blue above the baseline.">ⓘ</span>
+        </div>
+        <select id="periodSelect" class="bucket-select"></select>
+      </div>
+
+      <div class="chart-container">
+        <canvas id="dashExposureChart"></canvas>
+        <div class="chart-empty" id="dashChartEmpty" style="display:none">
+          No exposure data for this time period.
+        </div>
+      </div>
+
+      <!-- Custom legend — no separate CFaR bar (V3: CFaR is printed inside each bar) -->
+      <div class="chart-legend">
+        <div class="legend-item">
+          <div class="legend-dot" style="background:rgba(74,222,128,0.7)"></div>
+          Net Long (receivable)
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background:rgba(248,113,113,0.7)"></div>
+          Net Short (payable)
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background:rgba(107,114,128,0.5)"></div>
+          Flat (fully netted in this window)
+        </div>
+        <!-- Tooltip explaining why component CFaR can sometimes be negative -->
+        <div class="legend-item" style="margin-left:auto;color:var(--muted);font-size:10px;cursor:default">
+          Component CFaR printed inside bars
+          <span class="dash-tooltip-icon" style="font-size:11px;margin-left:4px" data-tip="Component CFaR is each currency's marginal contribution to Period VaR, derived from the full covariance matrix. It answers: how much does this currency add to total portfolio risk given its correlations with every other currency? It can occasionally be a small negative number — this means the position is acting as a portfolio hedge (reducing overall variance). Negative components are floored at zero in the chart for clarity but are included in the Period VaR total, which can therefore be slightly lower than the sum of visible bar heights. The bars and Period VaR total always remain consistent with each other.">ⓘ</span>
+        </div>
+      </div>
+
+      <!-- Period info strip (V3: cumulative period filter) -->
+      <div class="bucket-info">
+        <div class="bucket-info-cell">
+          <div class="bi-label">Period VaR</div>
+          <div class="bi-value blue" id="dashBiCfar">—</div>
+        </div>
+        <div class="bucket-info-cell">
+          <div class="bi-label">Positions Included</div>
+          <div class="bi-value teal" id="dashBiDivers">—</div>
+        </div>
+        <div class="bucket-info-cell">
+          <!-- Settlement Cutoff: the T boundary used to FILTER which positions are
+               included in this cumulative period. It is NOT a horizon used in any
+               calculation — each position uses its own actual T (days to settlement)
+               inside the covariance matrix. The label shows ≤ X trading days to make
+               this filtering role explicit and avoid confusion with VaR horizon T. -->
+          <div class="bi-label">Settlement Cutoff</div>
+          <div class="bi-value" style="color:var(--muted);font-size:13px" id="dashBiT">—</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── SIMULATION PANEL ── -->
+    <div class="sim-panel">
+      <h3>Scenario Simulation</h3>
+      <div class="sim-grid">
+
+        <div class="sim-block">
+          <h4>Currency Appreciation / Depreciation</h4>
+          <p class="sim-desc">
+            Shift the selected currency's spot rate. +10% = FCY appreciates
+            (buys 10% more base currency). CFaR scales exactly with spot rate.
+          </p>
+          <div class="currency-picker">
+            <label for="spotCcySelect">Currency</label>
+            <select id="spotCcySelect"></select>
+          </div>
+          <div class="slider-row">
+            <span class="slider-label">−10%</span>
+            <input type="range" id="spotSlider" min="-100" max="100" step="1" value="0">
+            <span class="slider-label">+10%</span>
+          </div>
+          <div style="text-align:center;margin-top:8px">
+            <span class="slider-value" id="dashSpotValue">+0.0%</span>
+            <span style="color:var(--muted);font-family:var(--mono);font-size:10px;margin-left:6px">spot shift</span>
+          </div>
+        </div>
+
+        <div class="sim-block">
+          <h4>Volatility Regime Change</h4>
+          <p class="sim-desc">
+            Scale all currency pair volatilities up or down. +25% = stressed
+            market. −25% = calm conditions. Drift (μ) is held constant.
+          </p>
+          <div style="height:38px"></div>
+          <div class="slider-row">
+            <span class="slider-label">−25%</span>
+            <input type="range" id="volSlider" min="-250" max="250" step="1" value="0">
+            <span class="slider-label">+25%</span>
+          </div>
+          <div style="text-align:center;margin-top:8px">
+            <span class="slider-value" id="dashVolValue">+0.0%</span>
+            <span style="color:var(--muted);font-family:var(--mono);font-size:10px;margin-left:6px">vol shift (all CCY)</span>
+          </div>
+        </div>
+
+      </div>
+      <p class="sim-note">
+        <strong style="color:var(--muted)">Updates live:</strong>
+        per-currency Component CFaR labels and Period VaR strip (always the sum of
+        the current bar values).
+        <strong style="color:var(--muted)">At Δ = 0:</strong>
+        bar values equal the exact server-side covariance decomposition — their sum
+        equals Period VaR exactly (Euler decomposition theorem; cross-currency
+        correlations are encoded inside each component, not lost).
+        <strong style="color:var(--muted)">While sliding:</strong>
+        each currency's vol term is scaled independently without rerunning the
+        covariance matrix, so the Period VaR strip becomes an approximation —
+        conservative (slightly overstates risk) by an amount proportional to
+        cross-currency correlation.
+        <strong style="color:var(--muted)">Never updated by sliders:</strong>
+        the Portfolio VaR stat card — that is fixed at the exact server-computed
+        value for the original inputs. Re-run Calculate to get exact numbers at
+        a different vol assumption.
+      </p>
+    </div>
+
+    <!-- ── HEDGE EFFECTIVENESS TABLE ── -->
+    <div class="hedge-section">
+      <h3>Natural Hedge Effectiveness — Per Currency Per Bucket</h3>
+      <p class="section-note">
+        Effectiveness = (1 − net CFaR / gross CFaR) × 100%. Measures how much
+        CFaR is eliminated by within-currency netting of receivables against
+        payables in the same time bucket. Static — does not change during
+        slider simulation (hedge effectiveness is invariant to both spot and
+        vol shifts). Cross-bucket same-currency netting appears only in the
+        consolidated Portfolio VaR above.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Currency</th><th>Bucket</th><th>Net Exposure</th>
+            <th>Net CFaR</th><th>Gross CFaR</th>
+            <th>Hedge Benefit</th><th>Effectiveness</th>
+          </tr>
+        </thead>
+        <tbody id="dashHedgeTableBody"></tbody>
+      </table>
+    </div>
+
+  </div><!-- /#results-dashboard -->
+  <!-- ── CASH BOOK RISK ── -->
+  <div id="results-s1" style="display:none">
+    <div class="section-title" style="margin-top:32px" id="spotSection">
+      Cash Book Risk
+    </div>
+    <div class="var-card" id="spotCard" style="display:none">
+      <div class="var-card-label">
+        <span id="rCashHorizon"></span>-Day FX Value at Risk · Cash Positions ·
+        <span id="rConfidence"></span> Confidence
+      </div>
+      <div class="var-headline">
+        <span class="ccy" id="rBaseCcy"></span><span id="rSpotVaR"></span>
+      </div>
+      <p class="var-subtext" id="rSpotInterp"></p>
+      <div class="risk-badge" id="rBadge">
+        <div class="risk-dot"></div>
+        <span id="rBadgeText"></span>
+      </div>
+      <div class="warn-box" id="rWarnBox"></div>
+      <div id="rPortfolioNote" style="display:none;font-family:var(--mono);font-size:11px;
+           color:var(--muted);margin-top:10px;padding:6px 10px;
+           background:rgba(255,255,255,0.03);border-radius:4px;
+           border:1px solid rgba(255,255,255,0.08);line-height:1.6">
+      </div>
+      <div id="rSpotCov" style="display:none"></div>
+    </div>
+    <div class="breakdown-grid" id="spotBreakdown"></div>
+  </div>
+
+  <!-- ── CONSOLIDATED PORTFOLIO VAR ── -->
+  <div id="results-consolidated" style="display:none;margin-top:24px">
+    <div class="section-title" style="margin-top:0">Consolidated Portfolio VaR</div>
+    <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.6">
+      Single number across your entire portfolio — cash + all forward exposures.
+      Each individual position (cash + forwards) enters the covariance matrix
+      at its actual settlement horizon using the exact min(T) cross-horizon formula.
+      Natural hedging between same-currency positions falls out automatically.
+    </div>
+    <div class="var-card" id="consolidatedCard">
+      <div class="var-card-label">
+        Consolidated FX VaR · Full Portfolio ·
+        <span id="rConfConsolidated"></span> Confidence
+      </div>
+      <div class="var-headline">
+        <span class="ccy" id="rBaseConsolidated"></span>
+        <span id="rConsolidatedVaR"></span>
+      </div>
+      <p class="var-subtext" id="rConsolidatedInterp"></p>
+      <div id="rConsolidatedBreakdown" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+
+
+
+  <!-- ── BUCKETED RISK DETAIL ── -->
+  <!-- Per-bucket technical breakdown: individual positions, net VaRs,      -->
+  <!-- natural hedge benefit, covariance diversification benefit per bucket. -->
+  <!-- Each bucket uses its own time horizon T and cannot be summed.        -->
   <div id="results-s2" style="display:none">
 
-    <!-- Partial fetch errors -->
+    <!-- Partial fetch errors (currencies that failed market data lookup) -->
     <div class="fetch-errors" id="fetchErrors"></div>
 
-    <!-- ── SECTION 2: UNIFIED BUCKETED RISK ── -->
+    <!-- ── BUCKETED RISK DETAIL ── -->
     <div class="section-title" style="margin-top:32px" id="fwdSection">
-      Section 2 — Unified Bucketed Risk
+      Bucketed Risk Detail
     </div>
     <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:16px;line-height:1.6">
-      Cash holdings (from Section 1) are treated as long positions in Bucket 1, where they net
-      against same-currency near-term payables. Forward exposures sit in their natural bucket by
-      settlement date. Within each bucket, positions in the same currency are netted first
-      (natural hedge benefit), then the remaining net positions across currencies are combined
-      using a covariance matrix (diversification benefit). Each bucket VaR uses its own time
-      horizon T and cannot be summed across buckets.
+      Cash holdings are treated as long positions in Bucket 1, netting against same-currency
+      near-term payables. Forward exposures are bucketed by settlement date. Within each bucket,
+      positions in the same currency are netted (natural hedge benefit), then the remaining net
+      positions across currencies are combined using a covariance matrix (diversification benefit).
+      Each bucket VaR uses its own time horizon T and cannot be summed across buckets.
     </div>
     <div id="bucketContainer"></div>
     <div class="no-total-notice" id="noTotalNotice" style="display:none">
@@ -771,25 +1006,111 @@
       is meaningful and actionable within its own settlement window.
     </div>
 
-    <!-- ── ASSUMPTIONS ── -->
-    <div class="assumptions">
-      <strong>Model — Full Parametric (Delta-Normal) VaR, V2.2/2.3</strong><br><br>
-      <strong>Section 1 — Spot Book:</strong> Standalone VaR on cash holdings at user-specified
-      T. σ_T = σ_annual × √(T/252); μ_T = μ_daily × T.
-      VaR = E × (Z_α × σ_T − μ_T) for long positions (cash, receivables);
-      VaR = E × (Z_α × σ_T + μ_T) for short positions (payables).<br><br>
-      <strong>Section 2 — Unified Bucketed:</strong> Cash holdings are treated as long positions
-      in Bucket 1, where they net against same-currency near-term payables. Forward exposures
-      are bucketed by settlement date. Within each bucket and currency, receivables and payables
-      are netted — the natural hedge benefit is the VaR saved by this netting vs treating each
-      position independently. VaR is computed on the net notional using the bucket midpoint T.<br><br>
-      <strong>Remaining limitations:</strong> Normality assumption understates fat tails for
-      crashing currencies (TRY, ARS) — Monte Carlo with Student's t planned for V3.
-      yfinance is an unofficial data source. No holiday calendar (Mon–Fri only).
-      Bucket midpoint T approximates each exposure's actual settlement T.
-    </div>
-
   </div><!-- /#results-s2 -->
+
+  <!-- ── MODEL NOTES & LIMITATIONS ── -->
+  <!-- Always visible on page load — does not depend on a Calculate response. -->
+  <!-- Placed outside #results-s2 deliberately so users can read the model   -->
+  <!-- methodology and limitations before entering any data.                  -->
+  <div class="assumptions" style="margin-top:40px">
+    <strong>Model — Parametric (Delta-Normal) VaR with Drift &nbsp;·&nbsp; V3 &nbsp;·&nbsp; Built by Aayan Vatsa, Finmo (June 2026)</strong><br><br>
+
+    <strong>VaR Formula:</strong>
+    VaR = E × (Z_α × σ_T − μ_T) for long positions (cash holdings, receivables) —
+    fear is FCY depreciation, so loss is at the left tail of the return distribution.
+    VaR = E × (Z_α × σ_T + μ_T) for short positions (payables) —
+    fear is FCY appreciation, so loss is at the right tail.
+    σ_T = σ_annual × √(T/252) scales volatility to horizon T;
+    μ_T = μ_daily × T scales drift linearly. Both E and σ are in base currency terms.
+    Z_α = norm.ppf(confidence), e.g. 1.645 at 95%.
+    A negative raw VaR (drift exceeds downside vol) is floored to zero for display — this
+    does NOT mean zero risk; a sudden trend reversal would not be captured.<br><br>
+
+    <strong>Confidence level:</strong>
+    95% VaR means there is a 5% chance of losing more than the stated amount over
+    the stated horizon under normal market conditions. It does not bound worst-case losses —
+    the 5% tail can contain arbitrarily large losses, especially for EM currencies.<br><br>
+
+    <strong>Output sections:</strong>
+    Cash Book Risk — standalone VaR on cash at user-specified T, covariance-adjusted across currencies.
+    Bucketed Risk Detail — cash routed into Bucket 1, forwards bucketed by settlement date;
+    within-currency netting then cross-currency covariance applied per bucket; bucket VaRs
+    use midpoint T and cannot be summed across buckets.
+    Consolidated Portfolio VaR — exact cross-horizon formula: Σ[i,j] = ρ[i,j] × σᵢ_daily × σⱼ_daily × min(Tᵢ, Tⱼ),
+    where min(Tᵢ, Tⱼ) is derived from the random walk assumption (only overlapping days survive
+    when expanding the covariance of two cumulative return series). Same-currency pairs use ρ=1;
+    natural hedging falls out automatically through signed exposures — no explicit netting step.<br><br>
+
+    <strong>Component CFaR (dashboard bars):</strong>
+    Each bar shows a currency's marginal contribution to total period risk via the Euler
+    decomposition: ComponentVaR_i = (sᵢ × (Σs)ᵢ / σ_p) × Z − sᵢ × μᵢ × Tᵢ.
+    Components sum exactly to Period VaR. A currency with large notional can show low
+    Component CFaR if its positions hedge others in the portfolio — this is correct, not an error.
+    For standalone risk per position see the Bucketed Risk Detail section.<br><br>
+
+    <strong>Gross Standalone Risk:</strong>
+    Sum of all individual position VaRs with no netting and no cross-currency diversification
+    (perfect correlation assumed). Includes cash at cash_horizon T and forwards at bucket-midpoint T.
+    Compared against Consolidated Portfolio VaR to produce the Risk Reduction percentage.
+    The T mismatch (bucket-midpoint for forwards vs actual T in consolidated) slightly overstates
+    the gross baseline, making risk reduction marginally approximate.<br><br>
+
+    <strong>Market data:</strong>
+    Daily closing prices from Yahoo Finance (yfinance) over the user-selected lookback period
+    (default 1 year). Returns are computed as daily percentage changes. Annualised vol =
+    σ_daily × √252; drift = mean daily return. Thinly traded or exotic pairs (e.g. MYR/SGD,
+    THB/SGD) are synthesised via USD cross-rates: spot(FCY/BCY) = spot(FCY/USD) × spot(USD/BCY);
+    returns are summed (exact for log-returns, close approximation for percentage returns).<br><br>
+
+    <strong>Known limitations and suggestions for future development:</strong>
+
+    <table style="width:100%;border-collapse:collapse;margin-top:10px;font-family:var(--mono);font-size:10.5px;line-height:1.7">
+      <thead>
+        <tr>
+          <th style="text-align:left;padding:6px 12px 6px 0;color:var(--muted);font-weight:500;border-bottom:1px solid var(--border);width:22%">Limitation</th>
+          <th style="text-align:left;padding:6px 12px 6px 0;color:var(--muted);font-weight:500;border-bottom:1px solid var(--border);width:40%">What it means</th>
+          <th style="text-align:left;padding:6px 0 6px 0;color:var(--muted);font-weight:500;border-bottom:1px solid var(--border)">Suggested improvement</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td style="padding:8px 12px 8px 0;vertical-align:top;color:var(--warn)">Normality assumption</td>
+          <td style="padding:8px 12px 8px 0;vertical-align:top">Returns assumed normally distributed. Understates tail risk for crashing EM currencies (TRY, ARS, IDR) with fat tails and negative skew.</td>
+          <td style="padding:8px 0 8px 0;vertical-align:top;color:var(--muted)">Monte Carlo simulation with Student's t distribution.</td>
+        </tr>
+        <tr style="border-top:1px solid var(--border)">
+          <td style="padding:8px 12px 8px 0;vertical-align:top;color:var(--warn)">Linear instruments only</td>
+          <td style="padding:8px 12px 8px 0;vertical-align:top">Exact for cash and FX forwards. Cannot price the asymmetric payoff of FX options or any exotic structures.</td>
+          <td style="padding:8px 0 8px 0;vertical-align:top;color:var(--muted)">Monte Carlo simulation for portfolios with optionality.</td>
+        </tr>
+        <tr style="border-top:1px solid var(--border)">
+          <td style="padding:8px 12px 8px 0;vertical-align:top;color:var(--warn)">Unofficial data source</td>
+          <td style="padding:8px 12px 8px 0;vertical-align:top">yfinance scrapes Yahoo Finance and can break without notice, causing silent fetch failures for affected currencies.</td>
+          <td style="padding:8px 0 8px 0;vertical-align:top;color:var(--muted)">Licensed vendor: Bloomberg, Refinitiv, or FRED + CurrencyLayer.</td>
+        </tr>
+        <tr style="border-top:1px solid var(--border)">
+          <td style="padding:8px 12px 8px 0;vertical-align:top;color:var(--warn)">No holiday calendar</td>
+          <td style="padding:8px 12px 8px 0;vertical-align:top">Trading days counted Mon–Fri only. Market holidays (SGX, NYSE, MAS, BNM) are ignored, slightly misaligning T for some pairs.</td>
+          <td style="padding:8px 0 8px 0;vertical-align:top;color:var(--muted)">pandas_market_calendars for market-specific business day counting.</td>
+        </tr>
+        <tr style="border-top:1px solid var(--border)">
+          <td style="padding:8px 12px 8px 0;vertical-align:top;color:var(--warn)">Bucket midpoint T</td>
+          <td style="padding:8px 12px 8px 0;vertical-align:top">Bucketed VaR uses each bucket's midpoint T rather than each exposure's exact settlement T, marginally overstating VaR for exposures early in a bucket. Consolidated VaR always uses exact T.</td>
+          <td style="padding:8px 0 8px 0;vertical-align:top;color:var(--muted)">Exposure-weighted average actual T per bucket instead of fixed midpoint.</td>
+        </tr>
+        <tr style="border-top:1px solid var(--border)">
+          <td style="padding:8px 12px 8px 0;vertical-align:top;color:var(--warn)">Slider approximation</td>
+          <td style="padding:8px 12px 8px 0;vertical-align:top">Vol and spot sliders scale Component CFaRs without rerunning the covariance matrix. Period VaR during sliding is a conservative approximation; Portfolio VaR card is always exact.</td>
+          <td style="padding:8px 0 8px 0;vertical-align:top;color:var(--muted)">Lightweight /simulate endpoint that reruns covariance server-side on slider change.</td>
+        </tr>
+        <tr style="border-top:1px solid var(--border)">
+          <td style="padding:8px 12px 8px 0;vertical-align:top;color:var(--warn)">Static correlations</td>
+          <td style="padding:8px 12px 8px 0;vertical-align:top">Correlation matrix estimated from the lookback window and assumed constant. Correlation breakdown during stress periods (2008, COVID) is not captured.</td>
+          <td style="padding:8px 0 8px 0;vertical-align:top;color:var(--muted)">DCC-GARCH dynamic correlations or a stressed correlation matrix overlay.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
 
 </div><!-- /.shell -->
 
@@ -804,6 +1125,55 @@ const CURRENCIES = [
 ];
 
 // =============================================================================
+// AMOUNT INPUT FORMATTING — comma-separated display, raw number for maths
+// =============================================================================
+//
+// Both cash balance and exposure amount inputs use type="text" so we can
+// display commas (e.g. "2,000,000"). The underlying value always stays a
+// plain number string when parsed — commas are stripped before any arithmetic.
+//
+// Strategy:
+//   - onAmountInput(): called on every keystroke. Strips non-numeric chars,
+//     re-inserts commas, restores cursor position relative to the right edge
+//     (stable across comma insertion/removal). Allows one decimal point.
+//   - formatWithCommas(): pure formatter, no side effects.
+//   - toRawNumber(): strips commas, returns float for calculate().
+
+function formatWithCommas(val) {
+  // Strip everything that isn't a digit or decimal point
+  const clean = String(val).replace(/[^0-9.]/g, '');
+
+  // Guard against multiple decimal points — keep only the first
+  const firstDot = clean.indexOf('.');
+  const intRaw   = firstDot >= 0 ? clean.slice(0, firstDot) : clean;
+  const decRaw   = firstDot >= 0 ? clean.slice(firstDot)    : '';
+
+  // Insert thousand-separator commas into the integer part
+  const intFormatted = intRaw.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+
+  return intFormatted + decRaw;
+}
+
+function onAmountInput(el) {
+  // Measure cursor distance from the RIGHT edge before reformatting.
+  // This is more stable than distance from the left because commas are
+  // inserted to the left of the cursor as digits accumulate.
+  const cursorFromRight = el.value.length - el.selectionEnd;
+
+  el.value = formatWithCommas(el.value);
+
+  // Restore cursor position from the right edge
+  const newPos = Math.max(0, el.value.length - cursorFromRight);
+  el.setSelectionRange(newPos, newPos);
+}
+
+function toRawNumber(el) {
+  // Strip commas and parse. Returns NaN if the field is empty or non-numeric,
+  // which the existing isNaN() guards in calculate() already handle correctly.
+  return parseFloat((el?.value || '').replace(/,/g, ''));
+}
+
+// =============================================================================
 // TABLE ROW MANAGEMENT — CASH POSITIONS
 // =============================================================================
 let cashId = 0;
@@ -814,12 +1184,19 @@ function addCashRow(ccy = '', balance = '') {
   const opts  = CURRENCIES
     .map(c => `<option value="${c}" ${c === ccy ? 'selected' : ''}>${c}</option>`)
     .join('');
+
+  // Pre-format any seed value so it appears with commas from the start
+  const displayVal = balance !== '' ? formatWithCommas(String(balance)) : '';
+
   const tr = document.createElement('tr');
   tr.id = `cash-${id}`;
   tr.innerHTML = `
     <td><select class="cell-select" id="cashCcy-${id}">${opts}</select></td>
-    <td><input class="cell-input" id="cashBal-${id}" type="number"
-         min="0" step="any" placeholder="e.g. 2000000" value="${balance}"></td>
+    <td><input class="cell-input" id="cashBal-${id}"
+         type="text" inputmode="numeric"
+         placeholder="e.g. 2,000,000"
+         value="${displayVal}"
+         oninput="onAmountInput(this)"></td>
     <td><button class="remove-btn" onclick="removeCash(${id})">×</button></td>
   `;
   tbody.appendChild(tr);
@@ -840,12 +1217,19 @@ function addExpRow(ccy = '', amount = '', date = '', dir = 'payable') {
   const opts  = CURRENCIES
     .map(c => `<option value="${c}" ${c === ccy ? 'selected' : ''}>${c}</option>`)
     .join('');
+
+  // Pre-format any seed value so it appears with commas from the start
+  const displayVal = amount !== '' ? formatWithCommas(String(amount)) : '';
+
   const tr = document.createElement('tr');
   tr.id = `exp-${id}`;
   tr.innerHTML = `
     <td><select class="cell-select" id="expCcy-${id}">${opts}</select></td>
-    <td><input class="cell-input" id="expAmt-${id}" type="number"
-         min="0" step="any" placeholder="e.g. 5000000" value="${amount}"></td>
+    <td><input class="cell-input" id="expAmt-${id}"
+         type="text" inputmode="numeric"
+         placeholder="e.g. 5,000,000"
+         value="${displayVal}"
+         oninput="onAmountInput(this)"></td>
     <td><input class="cell-input" id="expDate-${id}" type="date"
          value="${date}" style="min-width:130px"></td>
     <td>
@@ -869,15 +1253,40 @@ function updateDirStyle(sel) {
   sel.className = `cell-select direction-${sel.value}`;
 }
 
-// Seed defaults
+// Seed defaults — expanded portfolio to demonstrate all engine features:
+//
+//   CASH (routed into Bucket 1 as synthetic T=1 receivables):
+//     USD, MYR, AUD, EUR, GBP holdings
+//
+//   FORWARDS — designed to show:
+//     1. Natural hedge effectiveness in Bucket 2: USD recv 2mn vs pay 1mn (50% hedge)
+//     2. Natural hedge effectiveness in Bucket 2: MYR pay 8mn vs recv 3mn (~37.5% hedge)
+//     3. Natural hedge effectiveness in Bucket 4: EUR recv 1mn vs pay 0.6mn
+//     4. Zero net USD exposure in "Next 6 months" window with non-zero Component CFaR:
+//        Cash +2mn (T=1) + Recv +2mn (T≈43) + Pay −1mn (T≈49) + Pay −3mn (T≈99) = 0 net
+//        But min(Tᵢ,Tⱼ) covariance formula does NOT fully cancel because the payable
+//        at T=99 outlives the receivable at T=43 — 56 days of residual short exposure remain.
+//     5. Multiple currencies across all 5 buckets for rich period VaR variation
+//     6. GBP and AUD in later buckets beyond the near-term cash horizon
 addCashRow('USD',  '2000000');
 addCashRow('MYR',  '5000000');
 addCashRow('AUD',  '1000000');
-addExpRow('USD',  '2000000', '2026-08-15', 'receivable');
-addExpRow('USD',  '1000000', '2026-08-25', 'payable');
-addExpRow('MYR',  '8000000', '2026-08-20', 'payable');
-addExpRow('USD',  '3000000', '2026-10-30', 'payable');
-addExpRow('EUR',  '1000000', '2027-01-15', 'receivable');
+addCashRow('EUR',   '500000');
+addCashRow('GBP',   '300000');
+// Bucket 2 (1–3 months): USD partial hedge + MYR partial hedge
+addExpRow('USD',  '2000000', '2026-08-15', 'receivable');  // USD recv
+addExpRow('USD',  '1000000', '2026-08-25', 'payable');     // USD pay — nets 50% of recv
+addExpRow('MYR',  '8000000', '2026-08-20', 'payable');     // MYR pay
+addExpRow('MYR',  '3000000', '2026-08-10', 'receivable');  // MYR recv — nets ~37% of pay
+// Bucket 3 (3–6 months): USD large payable + AUD receivable
+addExpRow('USD',  '3000000', '2026-10-30', 'payable');     // USD pay (makes USD ~0 net in 6m period)
+addExpRow('AUD',  '1500000', '2026-09-25', 'receivable');  // AUD recv in B3
+// Bucket 4 (6–12 months): EUR partial hedge + GBP receivable
+addExpRow('EUR',  '1000000', '2027-01-15', 'receivable');  // EUR recv
+addExpRow('EUR',   '600000', '2027-03-15', 'payable');     // EUR pay — nets ~60%
+addExpRow('GBP',   '500000', '2027-02-28', 'receivable');  // GBP recv
+// Bucket 5 (>12 months): USD long-dated payable (demonstrates B5 + cross-bucket covariance)
+addExpRow('USD',  '2000000', '2027-07-15', 'payable');
 
 // =============================================================================
 // CALCULATE — collect inputs, POST to Flask, render results
@@ -893,7 +1302,8 @@ async function calculate() {
   for (const tr of document.getElementById('cashBody').querySelectorAll('tr')) {
     const id  = tr.id.replace('cash-', '');
     const ccy = document.getElementById(`cashCcy-${id}`)?.value;
-    const bal = parseFloat(document.getElementById(`cashBal-${id}`)?.value);
+    // toRawNumber() strips commas before parseFloat — commas are display-only
+    const bal = toRawNumber(document.getElementById(`cashBal-${id}`));
     if (!ccy || isNaN(bal) || bal <= 0) continue;
     if (ccy === baseCcy) continue;
     cashPositions.push({ currency: ccy, balance: bal });
@@ -904,7 +1314,8 @@ async function calculate() {
   for (const tr of document.getElementById('expBody').querySelectorAll('tr')) {
     const id   = tr.id.replace('exp-', '');
     const ccy  = document.getElementById(`expCcy-${id}`)?.value;
-    const amt  = parseFloat(document.getElementById(`expAmt-${id}`)?.value);
+    // toRawNumber() strips commas before parseFloat — commas are display-only
+    const amt  = toRawNumber(document.getElementById(`expAmt-${id}`));
     const dt   = document.getElementById(`expDate-${id}`)?.value;
     const dir  = document.getElementById(`expDir-${id}`)?.value;
     if (!ccy || isNaN(amt) || amt <= 0 || !dt) continue;
@@ -918,10 +1329,12 @@ async function calculate() {
   }
 
   setLoading(true);
-  setStatus('Running V2 engine — fetching market data and computing VaR…');
+  setStatus('Running V3 engine — fetching market data and computing VaR…');
   hideError();
   document.getElementById('results-s1').style.display = 'none';
   document.getElementById('results-s2').style.display = 'none';
+  document.getElementById('results-consolidated').style.display = 'none';
+  document.getElementById('results-dashboard').style.display = 'none';
 
   try {
     const resp = await fetch('/calculate', {
@@ -941,6 +1354,13 @@ async function calculate() {
     setLoading(false);
     setStatus('');
     renderResults(result);
+    // Fire custom event so dashboard.js can render the chart, sliders, and
+    // hedge table from the same response — no second fetch needed.
+    if (result.dashboard) {
+      document.dispatchEvent(new CustomEvent('varResultReady', {
+        detail: result.dashboard
+      }));
+    }
   } catch (err) {
     setLoading(false);
     setStatus('');
@@ -1217,6 +1637,56 @@ function renderResults(data) {
     }
   }
 
+  // ── Consolidated Portfolio VaR ────────────────────────────────────────────
+  const cv = data.consolidated_var;
+  if (cv && cv.total_var > 0) {
+    document.getElementById('results-consolidated').style.display = 'block';
+    document.getElementById('rConfConsolidated').textContent = `${Math.round(confidence*100)}%`;
+    document.getElementById('rBaseConsolidated').textContent = base_ccy + ' ';
+    document.getElementById('rConsolidatedVaR').textContent  = fmt(cv.total_var);
+
+    const floorNote = cv.var_was_floored
+      ? ` Raw: ${base_ccy} -${fmt(Math.abs(cv.total_var_raw))} (floored to 0).` : '';
+    document.getElementById('rConsolidatedInterp').innerHTML =
+      `<strong>${Math.round(confidence*100)}%</strong> chance the total portfolio ` +
+      `loses no more than <strong>${base_ccy} ${fmt(cv.total_var)}</strong> ` +
+      `under normal market conditions.${floorNote} ` +
+      `Computed across <strong>${cv.n_positions}</strong> individual positions ` +
+      `using exact covariance with per-position actual settlement horizons.`;
+
+    // Per-position breakdown table
+    const bdEl = document.getElementById('rConsolidatedBreakdown');
+    if (cv.position_breakdown && cv.position_breakdown.length > 0) {
+      const rows = cv.position_breakdown.map(p => {
+        const isLong   = p.signed_exposure_base > 0;
+        const dirClass = isLong ? 'long' : 'short';
+        const dirLabel = isLong ? 'LONG' : 'SHORT';
+        const isCash   = p.type === 'cash';
+        const dateStr  = isCash
+          ? `<span style="color:var(--accent);font-size:9px">[cash, T=${p.t_days}d]</span>`
+          : `${p.settlement_date} <span style="color:var(--muted);font-size:9px">T=${p.t_days}d</span>`;
+        return `
+          <div class="attr-row">
+            <span class="attr-arrow ${isLong ? 'recv' : 'pay'}">${isLong ? '→' : '←'}</span>
+            <span class="attr-dir">${p.currency}</span>
+            <span class="attr-amt">
+              <span class="net-direction-badge ${dirClass}" style="font-size:9px;padding:1px 5px">${dirLabel}</span>
+              ${base_ccy} ${fmt(Math.abs(p.signed_exposure_base))}
+            </span>
+            <span class="attr-date">${dateStr}</span>
+          </div>`;
+      }).join('');
+      bdEl.innerHTML = `
+        <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+             margin-bottom:6px">
+          Individual positions in matrix (sorted by size, largest first):
+        </div>
+        ${rows}`;
+    }
+  } else {
+    document.getElementById('results-consolidated').style.display = 'none';
+  }
+
   document.getElementById('results-s1').style.display = 'block';
   document.getElementById('results-s2').style.display = 'block';
 }
@@ -1248,5 +1718,14 @@ function fmtC(n) {
   return n.toFixed(0);
 }
 </script>
+
+<!-- Chart.js (required by dashboard.js) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<!-- chartjs-plugin-datalabels: renders Component CFaR values as text labels inside bars.
+     Must be loaded AFTER Chart.js and BEFORE dashboard.js so that ChartDataLabels
+     is defined when dashboard.js registers it with Chart.register(ChartDataLabels). -->
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<!-- Dashboard rendering: chart, sliders, hedge table -->
+<script src="/static/js/dashboard.js"></script>
 </body>
 </html>

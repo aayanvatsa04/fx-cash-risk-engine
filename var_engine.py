@@ -1,5 +1,5 @@
 """
-var_engine.py — FX Value at Risk computation engine (PoC v1 / V2)
+var_engine.py — FX Value at Risk computation engine (V3)
 
 This module is the single source of truth for all FX VaR mathematics.
 It is completely independent of Flask, HTML, or any web framework —
@@ -8,7 +8,7 @@ tested directly without any UI layer.
 
 Architecture note:
   This separation is intentional. When the engine is upgraded (e.g. adding
-  Monte Carlo simulation for V3, or swapping yfinance for a live data vendor),
+  Monte Carlo simulation, or swapping yfinance for a live data vendor),
   only this file changes. The Flask app and the HTML frontend are unaffected.
 
 V2 change:
@@ -24,6 +24,16 @@ V2.2 additions:
   simple-sum (perfect correlation) assumption with actual historical correlations.
   Both are called by exposure_engine.py — var_engine.py remains unaware of
   Flask, HTML, or exposure logic.
+
+V2.4 additions:
+  calculate_portfolio_var_cov_mixed_t(): extends calculate_portfolio_var_cov
+  to handle positions at DIFFERENT time horizons using the exact formula:
+      Σ[i,j] = ρ[i,j] × σᵢ_daily × σⱼ_daily × min(Tᵢ, Tⱼ)
+  The min(Tᵢ, Tⱼ) term is mathematically derived from the random walk
+  assumption: under daily return independence, only the min(Ti,Tj) overlapping
+  days survive when expanding Cov(rᵢ_Ti, rⱼ_Tj). Called by
+  exposure_engine.calculate_consolidated_portfolio_var with one entry per
+  individual exposure (not pre-netted), each at its actual settlement T.
 """
 
 import numpy as np
@@ -296,9 +306,11 @@ def calculate_parametric_var(
     Key assumptions:
       1. Returns are normally distributed (delta-normal method).
          Reasonable for stable G10 pairs; breaks down for crashing EM currencies
-         with fat tails. Monte Carlo with Student's t is planned for V2.
+         with fat tails. Monte Carlo with Student's t is a planned enhancement
+         (see Known Limitations in README).
       2. Linear exposures only — the parametric formula cannot price the
-         asymmetric payoff of FX options. Monte Carlo handles this in V2.
+         asymmetric payoff of FX options. Monte Carlo handles this as a
+         planned enhancement.
 
     Args:
         exposure_amount:   Net exposure in base currency (e.g. SGD).
@@ -653,6 +665,169 @@ def calculate_portfolio_var_cov(
     portfolio_drift_T = float(s @ mu_T)
 
     # Portfolio VaR
+    raw_var = z * portfolio_vol_T - portfolio_drift_T
+
+    return max(raw_var, 0.0), raw_var
+
+
+# =============================================================================
+# CROSS-HORIZON PORTFOLIO VaR — V2.4
+# =============================================================================
+
+def calculate_portfolio_var_cov_mixed_t(
+    signed_exposures_base: list[float],
+    ann_vols:              list[float],
+    daily_means:           list[float],
+    t_values:              list[int],
+    correlation_matrix:    np.ndarray,
+    confidence_level:      float,
+) -> tuple[float, float]:
+    """
+    Computes portfolio VaR across positions that may have DIFFERENT time horizons,
+    using the exact delta-normal covariance formula with per-position T values.
+
+    This is the rigorous solution to the cross-horizon aggregation problem —
+    the core challenge of producing a single consolidated VaR number when portfolio
+    positions settle at different dates. It is called by
+    calculate_consolidated_portfolio_var with one entry per individual exposure
+    (not pre-netted by currency), each at its own actual T.
+
+    === THE CROSS-HORIZON PROBLEM ===
+
+    Simply adding VaRs from different time horizons is wrong:
+        VaR(T=42) + VaR(T=189) ≠ VaR(combined portfolio)
+
+    VaR involves a square root and percentiles do not add. The correct approach
+    works at the VARIANCE level. Variance IS additive through the covariance
+    structure: combine all variances and covariances first, then take the square
+    root and multiply by Z exactly once at the very end.
+
+    === WHY THE FORMULA IS CORRECT ===
+
+    Each position's P&L over its own horizon Tᵢ is:
+        P&L_i = sᵢ × rᵢ_Ti
+
+    where rᵢ_Ti is the cumulative return of currency i over Tᵢ trading days.
+    Because each P&L is normally distributed and a sum of normals is normal,
+    the combined portfolio P&L is:
+        P&L_total ~ N(mean_total, variance_total)
+
+    The variance is:
+        variance_total = Σᵢ Σⱼ sᵢ × sⱼ × Cov(rᵢ_Ti, rⱼ_Tj)
+
+    === THE EXACT COVARIANCE FORMULA ===
+
+    Under the random walk assumption, daily returns are independent across time.
+    This means only same-day pairs survive when expanding Cov(rᵢ_Ti, rⱼ_Tj):
+
+    For two positions with horizons Ti and Tj (Ti ≤ Tj):
+
+        Cov(rᵢ_Ti, rⱼ_Tj) = Cov(Σₜ₌₁ᵀⁱ rᵢ_t,  Σₜ₌₁ᵀʲ rⱼ_t)
+                            = Σₜ Σₛ Cov(rᵢ_t, rⱼ_s)
+                            = Σₜ Cov(rᵢ_t, rⱼ_t)     ← only t=s terms survive
+                            = Ti × Cov(rᵢ_daily, rⱼ_daily)   [Ti ≤ Tj, so Ti terms]
+                            = min(Ti, Tj) × ρᵢⱼ × σᵢ_daily × σⱼ_daily
+
+    The min(Ti, Tj) arises naturally: position i only exists for Ti days, so
+    there are only Ti days when both positions co-exist and can co-move together.
+    After day Ti, position i has settled and contributes nothing further.
+
+    The full covariance matrix is therefore:
+        Σ[i,j] = ρᵢⱼ × σᵢ_daily × σⱼ_daily × min(Tᵢ, Tⱼ)
+
+    Special cases:
+        diagonal i=i:    ρ=1, min(Ti,Ti)=Ti  → σᵢ_daily² × Tᵢ = Var(rᵢ_Ti)  ✓
+        same currency:   ρ=1               → σ_daily² × min(Ti,Tj)            ✓
+        independent CCY: ρ≈0               → ≈0 cross-term                    ✓
+
+    === DIFFERENCE FROM calculate_portfolio_var_cov (V2.2) ===
+
+    V2.2 (same T for all, within a single bucket):
+        sigma_T   = ann_vols × √(T/252)            ← same T for all
+        Σ[i,j]    = ρ[i,j] × σ_Ti × σ_Tj           ← exact when Ti = Tj = T
+
+    THIS function (V2.4, individual T per position, exact cross-horizon):
+        sigma_daily = ann_vols / √252               ← convert to daily
+        Σ[i,j]      = ρ[i,j] × σᵢ_daily × σⱼ_daily × min(Tᵢ,Tⱼ)  ← exact always
+
+    The V2.2 formula is exact within a bucket (all positions same T). This
+    function is exact across any combination of horizons.
+
+    === CORRELATION MATRIX STRUCTURE (from caller) ===
+
+    For a portfolio of individual positions across multiple currencies, the
+    correlation matrix is n×n where n = total number of individual positions:
+        - same currency i,j: ρ[i,j] = 1.0 (same exchange rate, perfectly correlated)
+        - diff currency i,j: ρ[i,j] = historical Pearson correlation of daily returns
+
+    The natural hedging between a recv and a pay in the same currency falls out
+    automatically through the signed exposures and ρ=1:
+        2 × s_recv × s_pay × 1 × σ_daily² × min(Ti,Tj)
+        = 2 × (+E) × (-E) × σ_daily² × min(T)  ← negative → reduces variance ✓
+
+    No explicit netting step is needed — the covariance matrix handles it.
+
+    Args:
+        signed_exposures_base: List of signed exposures in base currency.
+                               One entry per INDIVIDUAL POSITION (not pre-netted).
+                               Positive = long (fear FCY depreciation).
+                               Negative = short (fear FCY appreciation).
+                               Must be in same order as correlation_matrix rows.
+        ann_vols:              Annualised volatility per position (same order).
+                               Converted internally to daily vol for the formula.
+        daily_means:           Daily mean return per position (same order).
+        t_values:              Actual T in trading days per position (same order).
+                               Actual settlement date T for forwards (from
+                               count_trading_days), cash_horizon for cash positions.
+        correlation_matrix:    n×n correlation matrix across all individual positions.
+                               Built by calculate_consolidated_portfolio_var with
+                               ρ=1 for same-currency pairs, historical ρ for cross.
+        confidence_level:      VaR confidence level (e.g. 0.95).
+
+    Returns:
+        (var_floored, var_raw) — same convention as calculate_parametric_var.
+        var_floored is clamped at 0; var_raw can be negative if drift dominates.
+    """
+    n = len(signed_exposures_base)
+    if n == 0:
+        return 0.0, 0.0
+
+    z = norm.ppf(confidence_level)
+    s = np.array(signed_exposures_base, dtype=float)
+    t = np.array(t_values,              dtype=float)
+
+    # Convert annualised vols to daily vols: σ_daily = σ_annual / √252
+    # The formula requires daily vols because min(Ti,Tj) counts trading DAYS.
+    sigma_daily = np.array(ann_vols, dtype=float) / np.sqrt(TRADING_DAYS_PER_YEAR)
+
+    # Build exact covariance matrix: Σ[i,j] = ρ[i,j] × σᵢ_daily × σⱼ_daily × min(Tᵢ,Tⱼ)
+    #
+    # np.minimum(t[:,None], t[None,:]) creates the n×n matrix of min(Tᵢ,Tⱼ) values:
+    #   - diagonal [i,i]: min(Ti,Ti) = Ti
+    #   - off-diagonal [i,j]: min(Ti,Tj) = the shorter of the two horizons
+    #
+    # np.outer(sigma_daily, sigma_daily) creates the n×n matrix of σᵢ_daily × σⱼ_daily.
+    #
+    # Elementwise multiplication of three matrices gives Σ[i,j]:
+    #   ρ[i,j] × σᵢ_daily × σⱼ_daily × min(Tᵢ,Tⱼ)
+    min_T = np.minimum(t[:, None], t[None, :])
+    cov_T = correlation_matrix * np.outer(sigma_daily, sigma_daily) * min_T
+
+    # Portfolio variance: sᵀ Σ s
+    # This is the quadratic form that sums all individual variances (diagonal)
+    # and all pairwise covariances (off-diagonal), weighted by signed exposures.
+    # For a PSD Σ this is always ≥ 0. Clamp to guard against floating point noise.
+    portfolio_variance = float(s @ cov_T @ s)
+    portfolio_vol_T    = np.sqrt(max(portfolio_variance, 0.0))
+
+    # Portfolio drift: Σᵢ(sᵢ × μᵢ_daily × Tᵢ)
+    # Each position uses its own Tᵢ to scale its drift contribution.
+    # Signed sᵢ: long drift helps (reduces VaR), short drift hurts (increases VaR).
+    mu_T = np.array(daily_means, dtype=float) * t
+    portfolio_drift_T = float(s @ mu_T)
+
+    # Portfolio VaR = Z × portfolio_vol − portfolio_drift
+    # = negative of the 5th percentile of the combined normal P&L distribution
     raw_var = z * portfolio_vol_T - portfolio_drift_T
 
     return max(raw_var, 0.0), raw_var
