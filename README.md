@@ -471,6 +471,7 @@ appears in the consolidated portfolio VaR via ρ=1 and opposite-signed exposures
 | CFaR labels inside bars only visible on hover | ✅ Fixed | Labels render immediately on chart load (chart.update after _cfarValues set) |
 | Floating-point noise producing "SGD -0" in hedge benefit column | ✅ Fixed | max(benefit, 0.0) applied before rounding in dashboard_engine.py |
 | Cash Positions / Future Exposures table headers misaligned with their columns | ✅ Fixed | Rebuilt as CSS Grid (see Frontend Architecture Note below); unscoped table CSS in dashboard.css now scoped to .hedge-section |
+| Risk Reduction info tooltip popup clipped/cut off | ✅ Fixed | Removed overflow:hidden from .stat-card (was clipping the tooltip); accent strip given its own border-radius instead |
 
 ---
 

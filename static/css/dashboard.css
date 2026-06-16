@@ -276,17 +276,29 @@ textarea {
   border-radius: 8px;
   padding:       20px 24px;
   position:      relative;
-  overflow:      hidden;
+  /* overflow was previously "hidden" here, used only to keep the coloured
+     accent strip's square corners from poking past the card's rounded
+     border. That also clipped the Risk Reduction info tooltip (positioned
+     absolute relative to this card), cutting its popup off on every edge
+     once the methodology note text grew long enough to overflow the card's
+     own bounding box. Fixed by removing the clip here and instead giving
+     .stat-card::before its own matching border-radius below, so the strip's
+     corners stay clean without the parent needing to clip anything. */
+  overflow:      visible;
 }
 
 /* Coloured left-border accent per card type */
 .stat-card::before {
-  content:  '';
-  position: absolute;
-  left:     0;
-  top:      0;
-  bottom:   0;
-  width:    3px;
+  content:       '';
+  position:      absolute;
+  left:          0;
+  top:           0;
+  bottom:        0;
+  width:         3px;
+  /* Matches .stat-card's border-radius (8px) on the left side only, so the
+     strip's top-left/bottom-left corners follow the card's rounded shape
+     even though the parent no longer clips overflow (see note above). */
+  border-radius: 8px 0 0 8px;
 }
 .stat-card.accent-green::before  { background: var(--accent); }
 .stat-card.accent-blue::before   { background: var(--info); }
