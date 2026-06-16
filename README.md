@@ -104,6 +104,15 @@ All four sections are driven by a single API response from one Calculate click.
   to total portfolio risk, including all cross-currency correlations — it is not
   a standalone single-currency VaR.
 
+- **Comma-Formatted Amount Inputs:** Cash balance and exposure amount fields
+  display thousand-separator commas live as the user types (e.g. "2,000,000"),
+  making order of magnitude immediately readable. These fields are
+  `type="text"` rather than `type="number"` specifically to allow commas;
+  `formatWithCommas()` reformats on every keystroke and `toRawNumber()`
+  strips commas back out before the value is parsed and sent to the backend.
+  The Python engine never sees a comma — this is purely a display-layer
+  concern, fully isolated in `calculator.html`'s JS.
+
 ---
 
 ## File Structure
@@ -177,6 +186,45 @@ fires CustomEvent('varResultReady', { detail: result.dashboard })
   ↓
 dashboard.js receives event → renders chart, sliders, hedge table
 ```
+
+### Frontend architecture note: CSS Grid vs native `<table>`
+
+The codebase intentionally mixes two different markup patterns for tabular
+content, and it's important to understand why before "cleaning this up":
+
+- **Cash Positions and Future Exposures inputs** (`calculator.html`) are built
+  with **CSS Grid** (`<div class="grid-row cash-cols">`, etc.), not `<table>`.
+- **The Hedge Effectiveness table** (`calculator.html`, inside `.hedge-section`)
+  and the Limitations table are still real `<table>` elements.
+
+This is not an inconsistency to fix — it's a deliberate fix *for* an
+inconsistency bug. `dashboard.css` originally had unscoped rules
+(`thead th:not(:first-child) { text-align: right; }` and similar) written
+for the Hedge Effectiveness table's numeric columns. Because those rules
+were never scoped to `.hedge-section`, they applied to *every* `<table>` on
+the page — including the Cash Positions and Future Exposures input tables,
+silently right-aligning their column headers regardless of what CSS was
+written locally in `calculator.html`. The unscoped rule had higher CSS
+specificity than the local fix, so it won every time.
+
+Two changes resolved this together:
+
+1. `dashboard.css`'s table rules are now scoped to `.hedge-section table`,
+   `.hedge-section thead th`, etc. — they can no longer leak onto any other
+   table on the page.
+2. The two input grids were rebuilt with CSS Grid instead of `<table>`, so
+   even if another unscoped table rule is introduced somewhere in the future,
+   these two grids are structurally immune to it (there is no `<table>`,
+   `<th>`, or `<td>` for such a rule to match).
+
+**For future developers:** if you add a new data table anywhere in this app,
+either (a) scope all of its CSS under a dedicated class the way
+`.hedge-section` does, or (b) follow the CSS Grid pattern used by
+`.cash-cols` / `.exp-cols` if it's an input form rather than a read-only
+data display. Never write bare `table`, `thead th`, `tbody td` selectors in
+`dashboard.css` or `calculator.html`'s `<style>` block — they apply
+page-wide and will silently affect every table that exists now or is added
+later.
 
 ---
 
@@ -422,6 +470,7 @@ appears in the consolidated portfolio VaR via ρ=1 and opposite-signed exposures
 | Cash excluded from gross standalone baseline (scope mismatch with portfolio VaR) | ✅ Fixed | Cash standalone VaRs now included in gross baseline (Option A) |
 | CFaR labels inside bars only visible on hover | ✅ Fixed | Labels render immediately on chart load (chart.update after _cfarValues set) |
 | Floating-point noise producing "SGD -0" in hedge benefit column | ✅ Fixed | max(benefit, 0.0) applied before rounding in dashboard_engine.py |
+| Cash Positions / Future Exposures table headers misaligned with their columns | ✅ Fixed | Rebuilt as CSS Grid (see Frontend Architecture Note below); unscoped table CSS in dashboard.css now scoped to .hedge-section |
 
 ---
 

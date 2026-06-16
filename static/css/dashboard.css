@@ -640,12 +640,25 @@ input[type="range"]::-moz-range-thumb {
   line-height:   1.5;
 }
 
-table {
+/* ── HEDGE EFFECTIVENESS TABLE (.hedge-section) ──
+   Scoped to .hedge-section specifically. These rules used to be bare/global
+   (table, thead th, tbody tr, tbody td with no ancestor scope), which meant
+   they applied to EVERY <table> on the page — including, at one point, the
+   Cash Positions and Future Exposures input tables in calculator.html, where
+   the unscoped `thead th:not(:first-child) { text-align: right; }` rule
+   silently forced every header except the first column to right-align,
+   regardless of what calculator.html's own CSS said. That bug is what
+   prompted scoping this block. calculator.html's input tables have since
+   been rebuilt with CSS Grid (not <table>) specifically so they can never
+   be affected by table-wide rules defined here again — but scoping this
+   block too means any FUTURE <table> added anywhere else in the app won't
+   silently inherit hedge-table-specific styling either. */
+.hedge-section table {
   width:           100%;
   border-collapse: collapse;
 }
 
-thead th {
+.hedge-section thead th {
   font-family:    var(--mono);
   font-size:      10px;
   letter-spacing: 0.1em;
@@ -656,22 +669,22 @@ thead th {
   border-bottom:  1px solid var(--border2);
 }
 
-thead th:not(:first-child) { text-align: right; }
+.hedge-section thead th:not(:first-child) { text-align: right; }
 
-tbody tr {
+.hedge-section tbody tr {
   border-bottom:  1px solid var(--border);
   transition:     background 0.1s;
 }
-tbody tr:hover { background: var(--surface2); }
-tbody tr:last-child { border-bottom: none; }
+.hedge-section tbody tr:hover { background: var(--surface2); }
+.hedge-section tbody tr:last-child { border-bottom: none; }
 
-tbody td {
+.hedge-section tbody td {
   font-family:          var(--mono);
   font-size:            12px;
   padding:              10px 12px;
   font-variant-numeric: tabular-nums;
 }
-tbody td:not(:first-child) { text-align: right; }
+.hedge-section tbody td:not(:first-child) { text-align: right; }
 
 /* Coloured direction badge */
 .dir-badge {

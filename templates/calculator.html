@@ -144,25 +144,58 @@
     margin-bottom: 16px;
   }
   table { width: 100%; border-collapse: collapse; }
-  thead th {
+
+  /* ── INPUT TABLES (Cash Positions, Future Exposures) — CSS GRID, NOT <table> ──
+     These two input grids are built with CSS Grid rather than native HTML
+     <table> markup. The reason: native table column widths (even under
+     table-layout:fixed) are ultimately still derived from cell content in
+     some browser implementations, and a <select> or 100%-width <input> can
+     report inconsistent preferred widths depending on browser, OS, and
+     zoom level — which can cause the header row's column boundaries to
+     drift away from the column boundaries used by the body rows below.
+
+     CSS Grid sidesteps this entirely: grid-template-columns below is a
+     literal, fixed list of column sizes (px values + one 1fr flexible
+     column). This same literal value is applied via the .cash-cols /
+     .exp-cols class to BOTH the header row and every dynamically-added
+     body row. Since the column sizes are hard constants — never derived
+     from what's inside a cell — the header and every row are GUARANTEED
+     to line up pixel-for-pixel, regardless of what control sits inside
+     any given cell. This removes any dependency on browser-specific table
+     layout quirks.
+
+     .cash-cols → Currency | Balance (flexible) | Delete button
+     .exp-cols  → Currency | Amount (flexible) | Settlement Date | Direction | Delete button */
+  .cash-cols { grid-template-columns: 130px 1fr 48px; }
+  .exp-cols  { grid-template-columns: 130px 1fr 160px 140px 48px; }
+
+  .grid-header,
+  .grid-row {
+    display: grid;
+    align-items: center;
+  }
+  .grid-header {
     font-family: var(--mono);
     font-size: 11px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--muted);
-    padding: 12px 16px;
-    text-align: left;
     background: var(--surface2);
     border-bottom: 1px solid var(--border);
-    font-weight: 400;
   }
-  tbody tr {
+  .grid-th { padding: 12px 16px; }
+  .grid-row {
     border-bottom: 1px solid var(--border);
     transition: background 0.1s;
   }
-  tbody tr:last-child { border-bottom: none; }
-  tbody tr:hover { background: var(--surface2); }
-  tbody td { padding: 10px 16px; vertical-align: middle; }
+  .grid-row:last-child { border-bottom: none; }
+  .grid-row:hover { background: var(--surface2); }
+  .grid-td {
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    min-width: 0;   /* allows children to shrink below their intrinsic width if needed */
+  }
 
   .cell-input {
     background: transparent;
@@ -653,18 +686,19 @@
   </div>
 
   <!-- ── CASH POSITIONS ── -->
+  <!-- Built with CSS Grid (not <table>) — see .cash-cols / .grid-header /
+       .grid-row in the <style> block above for why. In short: this avoids
+       any possibility of a global stylesheet rule (e.g. one written for a
+       different table elsewhere in the app) silently overriding the
+       alignment of this specific input grid. -->
   <div class="section-title">Cash Positions</div>
   <div class="table-wrapper">
-    <table>
-      <thead>
-        <tr>
-          <th>Currency</th>
-          <th>Balance</th>
-          <th style="width:48px"></th>
-        </tr>
-      </thead>
-      <tbody id="cashBody"></tbody>
-    </table>
+    <div class="grid-header cash-cols">
+      <div class="grid-th">Currency</div>
+      <div class="grid-th">Balance</div>
+      <div class="grid-th"></div>
+    </div>
+    <div id="cashBody"></div>
   </div>
   <button class="add-row-btn" onclick="addCashRow()">
     <span style="font-size:16px">+</span> Add cash position
@@ -689,20 +723,18 @@
     settlement date — this selector has no effect on them.
   </div>
 
+  <!-- ── FUTURE EXPOSURES ── -->
+  <!-- Built with CSS Grid for the same reason as Cash Positions above. -->
   <div class="section-title" style="margin-top:32px">Future Exposures</div>
   <div class="table-wrapper">
-    <table>
-      <thead>
-        <tr>
-          <th>Currency</th>
-          <th>Amount</th>
-          <th>Settlement Date</th>
-          <th>Direction</th>
-          <th style="width:48px"></th>
-        </tr>
-      </thead>
-      <tbody id="expBody"></tbody>
-    </table>
+    <div class="grid-header exp-cols">
+      <div class="grid-th">Currency</div>
+      <div class="grid-th">Amount</div>
+      <div class="grid-th">Settlement Date</div>
+      <div class="grid-th">Direction</div>
+      <div class="grid-th"></div>
+    </div>
+    <div id="expBody"></div>
   </div>
   <button class="add-row-btn" onclick="addExpRow()">
     <span style="font-size:16px">+</span> Add future exposure
@@ -1174,32 +1206,41 @@ function toRawNumber(el) {
 }
 
 // =============================================================================
-// TABLE ROW MANAGEMENT — CASH POSITIONS
+// INPUT GRID ROW MANAGEMENT — CASH POSITIONS
 // =============================================================================
+// NOTE: these rows are <div class="grid-row cash-cols"> elements, not <tr>.
+// See the .cash-cols / .grid-row CSS rules near the top of the file for why
+// this uses CSS Grid instead of a native <table> — in short, it guarantees
+// these columns can never be affected by table-scoped CSS rules defined
+// elsewhere in the app (e.g. in dashboard.css for a different table).
 let cashId = 0;
 
 function addCashRow(ccy = '', balance = '') {
-  const tbody = document.getElementById('cashBody');
-  const id    = cashId++;
-  const opts  = CURRENCIES
+  const container = document.getElementById('cashBody');
+  const id        = cashId++;
+  const opts      = CURRENCIES
     .map(c => `<option value="${c}" ${c === ccy ? 'selected' : ''}>${c}</option>`)
     .join('');
 
   // Pre-format any seed value so it appears with commas from the start
   const displayVal = balance !== '' ? formatWithCommas(String(balance)) : '';
 
-  const tr = document.createElement('tr');
-  tr.id = `cash-${id}`;
-  tr.innerHTML = `
-    <td><select class="cell-select" id="cashCcy-${id}">${opts}</select></td>
-    <td><input class="cell-input" id="cashBal-${id}"
+  // .cash-cols on this row applies the EXACT same grid-template-columns as
+  // the header above, so this row's 3 cells always line up with "Currency",
+  // "Balance", and the (empty) delete-button header column.
+  const row = document.createElement('div');
+  row.className = 'grid-row cash-cols';
+  row.id        = `cash-${id}`;
+  row.innerHTML = `
+    <div class="grid-td"><select class="cell-select" id="cashCcy-${id}">${opts}</select></div>
+    <div class="grid-td"><input class="cell-input" id="cashBal-${id}"
          type="text" inputmode="numeric"
          placeholder="e.g. 2,000,000"
          value="${displayVal}"
-         oninput="onAmountInput(this)"></td>
-    <td><button class="remove-btn" onclick="removeCash(${id})">×</button></td>
+         oninput="onAmountInput(this)"></div>
+    <div class="grid-td"><button class="remove-btn" onclick="removeCash(${id})">×</button></div>
   `;
-  tbody.appendChild(tr);
+  container.appendChild(row);
 }
 
 function removeCash(id) {
@@ -1207,41 +1248,43 @@ function removeCash(id) {
 }
 
 // =============================================================================
-// TABLE ROW MANAGEMENT — FUTURE EXPOSURES
+// INPUT GRID ROW MANAGEMENT — FUTURE EXPOSURES
 // =============================================================================
+// Same CSS Grid approach as Cash Positions above — see .exp-cols.
 let expId = 0;
 
 function addExpRow(ccy = '', amount = '', date = '', dir = 'payable') {
-  const tbody = document.getElementById('expBody');
-  const id    = expId++;
-  const opts  = CURRENCIES
+  const container = document.getElementById('expBody');
+  const id        = expId++;
+  const opts      = CURRENCIES
     .map(c => `<option value="${c}" ${c === ccy ? 'selected' : ''}>${c}</option>`)
     .join('');
 
   // Pre-format any seed value so it appears with commas from the start
   const displayVal = amount !== '' ? formatWithCommas(String(amount)) : '';
 
-  const tr = document.createElement('tr');
-  tr.id = `exp-${id}`;
-  tr.innerHTML = `
-    <td><select class="cell-select" id="expCcy-${id}">${opts}</select></td>
-    <td><input class="cell-input" id="expAmt-${id}"
+  const row = document.createElement('div');
+  row.className = 'grid-row exp-cols';
+  row.id        = `exp-${id}`;
+  row.innerHTML = `
+    <div class="grid-td"><select class="cell-select" id="expCcy-${id}">${opts}</select></div>
+    <div class="grid-td"><input class="cell-input" id="expAmt-${id}"
          type="text" inputmode="numeric"
          placeholder="e.g. 5,000,000"
          value="${displayVal}"
-         oninput="onAmountInput(this)"></td>
-    <td><input class="cell-input" id="expDate-${id}" type="date"
-         value="${date}" style="min-width:130px"></td>
-    <td>
+         oninput="onAmountInput(this)"></div>
+    <div class="grid-td"><input class="cell-input" id="expDate-${id}" type="date"
+         value="${date}"></div>
+    <div class="grid-td">
       <select class="cell-select direction-${dir}" id="expDir-${id}"
               onchange="updateDirStyle(this)">
         <option value="payable"    ${dir==='payable'    ? 'selected' : ''}>Payable</option>
         <option value="receivable" ${dir==='receivable' ? 'selected' : ''}>Receivable</option>
       </select>
-    </td>
-    <td><button class="remove-btn" onclick="removeExp(${expId-1})">×</button></td>
+    </div>
+    <div class="grid-td"><button class="remove-btn" onclick="removeExp(${expId-1})">×</button></div>
   `;
-  tbody.appendChild(tr);
+  container.appendChild(row);
 }
 
 function removeExp(id) {
@@ -1298,9 +1341,11 @@ async function calculate() {
   const cashHorizon = parseInt(document.getElementById('cashHorizon').value, 10);
 
   // Collect cash positions
+  // NOTE: rows are <div class="grid-row cash-cols" id="cash-N">, not <tr> —
+  // see addCashRow() and the CSS Grid notes near the top of <style>.
   const cashPositions = [];
-  for (const tr of document.getElementById('cashBody').querySelectorAll('tr')) {
-    const id  = tr.id.replace('cash-', '');
+  for (const row of document.getElementById('cashBody').querySelectorAll('.grid-row')) {
+    const id  = row.id.replace('cash-', '');
     const ccy = document.getElementById(`cashCcy-${id}`)?.value;
     // toRawNumber() strips commas before parseFloat — commas are display-only
     const bal = toRawNumber(document.getElementById(`cashBal-${id}`));
@@ -1310,9 +1355,10 @@ async function calculate() {
   }
 
   // Collect future exposures
+  // NOTE: rows are <div class="grid-row exp-cols" id="exp-N">, not <tr>.
   const exposures = [];
-  for (const tr of document.getElementById('expBody').querySelectorAll('tr')) {
-    const id   = tr.id.replace('exp-', '');
+  for (const row of document.getElementById('expBody').querySelectorAll('.grid-row')) {
+    const id   = row.id.replace('exp-', '');
     const ccy  = document.getElementById(`expCcy-${id}`)?.value;
     // toRawNumber() strips commas before parseFloat — commas are display-only
     const amt  = toRawNumber(document.getElementById(`expAmt-${id}`));
