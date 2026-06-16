@@ -3,6 +3,8 @@
 **Finmo Product Intern Project**
 Built by Aayan Vatsa · June 2026
 
+**Live App:** https://fx-cash-risk-engine.onrender.com
+
 ---
 
 ## What This Is
@@ -107,7 +109,7 @@ All four sections are driven by a single API response from one Calculate click.
 ## File Structure
 
 ```
-fx_var_v3/
+fx-cash-risk-engine/
 ├── app.py                  Flask web server — routes: GET / and POST /calculate
 ├── var_engine.py           Core VaR math — σ, μ, parametric formula, covariance
 ├── exposure_engine.py      Business logic — dates, buckets, netting, unified output
@@ -425,11 +427,19 @@ appears in the consolidated portfolio VaR via ρ=1 and opposite-signed exposures
 
 ## Deployment (Render)
 
-This app is deployed on [Render](https://render.com).
+This app is deployed on [Render](https://render.com) at
+**https://fx-cash-risk-engine.onrender.com**.
 
-Render reads `requirements.txt` to install dependencies and `Procfile` to
-start the app. The `PORT` environment variable is injected by Render
-automatically — the app reads it via `os.environ.get('PORT', 8080)`.
+Render does not auto-read the `Procfile` for native (non-Docker) runtimes —
+the Start Command is set explicitly in the Render dashboard to match it:
+
+    gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1
+
+The `PORT` environment variable is injected by Render automatically; gunicorn
+binds directly to it via `$PORT` in the start command above. (Note: the
+`os.environ.get('PORT', 8080)` fallback inside `app.py`'s `__main__` block is
+only exercised when running locally with `python app.py` — gunicorn never
+calls that block, since it imports the `app` object directly.)
 
 To redeploy: push any commit to the `main` branch on GitHub. Render
 automatically detects the push and redeploys within ~2 minutes.
