@@ -8,23 +8,16 @@
 <style>
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500&display=swap');
 
-  :root {
-    --bg:         #0d0f12;
-    --surface:    #13161b;
-    --surface2:   #1a1e25;
-    --border:     #252a33;
-    --border2:    #2e3440;
-    --text:       #e8eaf0;
-    --muted:      #6b7280;
-    --accent:     #4ade80;
-    --warn:       #fbbf24;
-    --danger:     #f87171;
-    --info:       #60a5fa;
-    --hedge:      #a78bfa;   /* purple — natural hedge benefit */
-    --mono:       'DM Mono', monospace;
-    --serif:      'Instrument Serif', serif;
-    --sans:       'DM Sans', sans-serif;
-  }
+  /* Design tokens (--bg, --accent, --mono, etc.) used throughout this
+     <style> block are NOT defined here — they live in exactly one place,
+     dashboard.css's :root block, which is loaded via the <link> tag above
+     and applies to the whole document regardless of which stylesheet
+     declared it. This file used to carry its own duplicate :root with the
+     same values, which is a maintenance trap: someone retheming via only
+     dashboard.css (as its own comment instructs) would have silently had
+     no effect, since this file's copy loaded later and would win the
+     cascade. Removed — if a colour or font looks wrong, the only place to
+     check or change it now is dashboard.css. */
 
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -263,8 +256,18 @@
     cursor: pointer;
     font-weight: 500;
   }
-  .cell-select.direction-payable  { color: var(--danger); }
-  .cell-select.direction-recv     { color: var(--accent); }
+  /* Class names here must match the <option value="..."> strings exactly,
+     since updateDirStyle() builds the class as `direction-${sel.value}` —
+     see the <select> markup and updateDirStyle() further down this file.
+     This was previously `.direction-recv`, which never matched anything
+     (the actual option value is "receivable", not "recv"), so Receivable
+     was silently falling back to .cell-select's own default colour. That
+     happened to be the same green this rule sets, so there was no visible
+     bug — but it meant changing this rule changed nothing, since it was
+     dead. The Payable rule below has always matched, since "payable" is
+     also the literal option value. */
+  .cell-select.direction-payable    { color: var(--danger); }
+  .cell-select.direction-receivable { color: var(--accent); }
 
   .remove-btn {
     background: none;
@@ -626,9 +629,15 @@
   }
   .net-summary-table tbody tr:last-child td { border-bottom: none; }
   .net-summary-table tbody td:first-child { text-align: left; }
-  .net-val-positive { color: var(--accent); }
-  .net-val-negative { color: var(--danger); }
-  .net-val-flat     { color: var(--muted);  }
+  /* .net-val-positive/negative/flat removed here — confirmed unused by any
+     JS in this file (no element anywhere ever receives these classes).
+     Net direction colour-coding in this table is handled instead by
+     .net-direction-badge.long/.short/.flat further down, which IS applied
+     (see the ${dirClass} template literal near renderNetSummary-style
+     rows). If a future developer wants per-cell value colouring (rather
+     than just the badge) on top of that, reintroduce a rule here scoped to
+     whatever class the new code actually applies — don't resurrect this
+     exact name without first confirming where it would be used. */
 
   /* ── ASSUMPTIONS ── */
   .assumptions {
@@ -1905,13 +1914,43 @@ function showError(msg) {
 function hideError() {
   document.getElementById('errorBox').style.display = 'none';
 }
+/**
+ * fmt(n) — formats a number to 2 decimal places with comma separators.
+ * Used throughout the Spot Book Risk, Bucketed Risk Detail, and Consolidated
+ * VaR sections (the raw engine output, rendered directly by this file's JS —
+ * see dashboard.js's fmtNum() for the parallel formatter used by the Risk
+ * Dashboard / Hedge Effectiveness table, which has the same fix for the
+ * same reason).
+ *
+ * NEGATIVE-ZERO FIX: a value that is mathematically zero can arrive here as
+ * a tiny negative float (e.g. -0.0004) — floating-point noise from upstream
+ * subtraction (gross VaR minus net VaR, or netting two offsetting positions)
+ * that Python's own round(x, 2) does not fully eliminate, since round(-0.0004, 2)
+ * is itself -0.0, not 0.0. (-0.0004).toLocaleString('en-US', {minimumFractionDigits:2})
+ * renders the literal string "-0.00", which is what produced "SGD -0" in the
+ * UI. Flooring anything within half a cent of zero to a real `0` before
+ * formatting fixes every field that flows through fmt() — this previously
+ * showed up specifically in the hedge benefit column (fixed once there in
+ * dashboard_engine.py at the time), then recurred in a different field that
+ * point-fix didn't cover, which is why the fix now lives here instead, at
+ * the single shared formatting chokepoint every numeric display in this
+ * file goes through.
+ */
 function fmt(n) {
+  if (Math.abs(n) < 0.005) n = 0;
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+/**
+ * fmtC(n) — compact K/M/B formatter for large headline figures (stat cards).
+ * Same negative-zero guard as fmt() above, applied before the final
+ * toFixed(0) branch (the only branch narrow enough for -0 to surface in
+ * practice — values reaching the K/M/B branches are never near zero).
+ */
 function fmtC(n) {
   if (n >= 1e9) return (n/1e9).toFixed(2) + 'B';
   if (n >= 1e6) return (n/1e6).toFixed(2) + 'M';
   if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  if (Math.abs(n) < 0.5) n = 0;
   return n.toFixed(0);
 }
 </script>

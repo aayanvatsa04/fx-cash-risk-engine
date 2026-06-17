@@ -17,14 +17,23 @@
     - Chart container with responsive height
     - Hedge effectiveness table
   
-  Future developers: all colours are CSS custom properties defined in :root.
-  To retheme, change the :root block only — nothing else needs touching.
+  Future developers: all colours are CSS custom properties defined in :root,
+  defined ONCE, in this file only (calculator.html used to carry its own
+  duplicate :root block with the same values — removed, since two copies
+  of the same constants is exactly the kind of thing that quietly drifts
+  out of sync the next time only one of them gets edited). To retheme,
+  change the :root block below — nothing else needs touching, in this file
+  or any other.
 */
 
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500&display=swap');
 
 /* ============================================================
-   DESIGN TOKENS — match calculator.html :root exactly
+   DESIGN TOKENS — the only :root block in the app. calculator.html's
+   own <style> block (and any future stylesheet added to this page) reads
+   these via var(--bg) etc. without redefining them — custom properties on
+   :root apply to the whole document regardless of which loaded stylesheet
+   declared them, so there is nothing else to keep in sync.
    ============================================================ */
 :root {
   /* Backgrounds */
@@ -737,41 +746,18 @@ input[type="range"]::-moz-range-thumb {
 }
 .hedge-section tbody td:not(:first-child) { text-align: right; }
 
-/* Coloured direction badge */
-.dir-badge {
-  display:       inline-block;
-  font-size:     9px;
-  font-family:   var(--mono);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  padding:       2px 6px;
-  border-radius: 3px;
-  margin-left:   6px;
-}
-.dir-badge.long  { background: rgba(74,222,128,0.12); color: var(--accent); }
-.dir-badge.short { background: rgba(248,113,113,0.12); color: var(--danger); }
-.dir-badge.flat  { background: rgba(107,114,128,0.12); color: var(--muted); }
-
-/* Effectiveness bar within the table cell */
-.eff-bar-wrap {
-  display:     flex;
-  align-items: center;
-  gap:         8px;
-  justify-content: flex-end;
-}
-.eff-bar-bg {
-  width:         80px;
-  height:        5px;
-  background:    var(--border2);
-  border-radius: 2px;
-  overflow:      hidden;
-}
-.eff-bar-fill {
-  height:        100%;
-  background:    var(--hedge);
-  border-radius: 2px;
-  transition:    width 0.3s;
-}
+/* NOTE: an earlier, unprefixed .dir-badge / .eff-bar-wrap / .eff-bar-bg /
+   .eff-bar-fill set of rules used to live here. dashboard.js actually
+   generates .dash-dir-badge and .dash-eff-wrap/bg/fill (see
+   renderHedgeTable() below, around the <span class="dash-dir-badge ...">
+   and <div class="dash-eff-wrap"> markup) — the unprefixed versions were
+   confirmed to have zero matching elements anywhere in the app and have
+   been removed. The live, in-use rules are further down this file under
+   "Direction badge inside the hedge effectiveness table". If you're
+   styling the hedge table's badge or effectiveness bar, edit THOSE rules —
+   editing rules with this old unprefixed naming pattern again here will
+   silently do nothing, which is exactly what made this dead code in the
+   first place. */
 
 /* ============================================================
    RESPONSIVE ADJUSTMENTS

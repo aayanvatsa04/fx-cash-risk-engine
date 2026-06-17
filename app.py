@@ -171,13 +171,24 @@ def calculate():
         JSON combining calculate_fx_var() output with dashboard chart data:
         {
             — Raw engine output (unchanged from previous API) —
-            'base_ccy':          str,
-            'confidence':        float,
-            'cash_horizon':      int,
-            'spot_risk':         dict,   — Section 1: standalone cash VaR
-            'unified_buckets':   dict,   — Section 2: cash + forwards, bucketed
-            'gross_attribution': dict,   — Section 3: forwards-only, no netting
-            'consolidated_var':  dict,   — exact cross-horizon portfolio VaR
+            'base_ccy':               str,
+            'confidence':             float,
+            'cash_horizon':           int,
+            'spot_risk':              dict,  — Section 1: standalone cash VaR
+            'unified_buckets':        dict,  — Section 2: cash + forwards, bucketed
+            'gross_attribution':      dict,  — Section 3: forwards-only, no netting
+            'gross_cash_attribution': dict,  — cash standalone VaR at the fixed
+                                       CASH_CONSOLIDATED_T_DAYS horizon (10 trading
+                                       days); the cash component of the Gross
+                                       Standalone Risk baseline, deliberately
+                                       independent of cash_horizon above — see
+                                       exposure_engine.py's CASH_CONSOLIDATED_T_DAYS
+                                       comment for why this is a separate key
+                                       from spot_risk rather than reusing it
+            'consolidated_var':       dict,  — exact cross-horizon portfolio VaR
+            'cumulative_vars':        dict,  — V3: per-period VaR + Component CFaR
+                                       decomposition, one entry per dashboard
+                                       period filter option (1m/3m/6m/12m/all)
 
             — Dashboard chart data (added by dashboard_engine.prepare_dashboard_data) —
             'dashboard': {

@@ -175,21 +175,33 @@ def prepare_dashboard_data(var_result: dict) -> dict:
     === OPTION A — CASH INCLUDED IN GROSS BASELINE ===
 
     gross_standalone_sum now includes cash position standalone VaRs
-    (via spot_risk['total_var'] — the simple sum at cash_horizon T)
+    (via gross_cash_attribution — computed at the fixed
+    CASH_CONSOLIDATED_T_DAYS horizon, deliberately independent of the
+    user-adjustable Cash VaR Horizon dropdown / spot_risk's cash_horizon T)
     in addition to the forward standalone VaRs from Section 3.
     This makes the gross baseline scope-consistent with consolidated_var,
-    which already includes cash + forwards. See module docstring for details.
+    which already includes cash + forwards. See this module's docstring,
+    "GROSS STANDALONE RISK — SCOPE (final state)" section above, for the
+    full rationale and the bug this fixed.
 
     Args:
         var_result: The full dict returned by calculate_fx_var().
                     Must contain:
-                        'base_ccy':          str
-                        'confidence':        float
-                        'unified_buckets':   {'buckets': list, 'errors': list}
-                        'gross_attribution': {'exposures': list}
-                        'consolidated_var':  {'total_var': float, ...}
-                        'spot_risk':         {'total_var': float, ...}
-                        'cumulative_vars':   dict  — V3: per-period VaR and components
+                        'base_ccy':                str
+                        'confidence':              float
+                        'unified_buckets':         {'buckets': list, 'errors': list}
+                        'gross_attribution':       {'exposures': list}
+                        'gross_cash_attribution':  {'exposures': list} — cash
+                                                    component of the gross
+                                                    baseline (Option A above);
+                                                    NOT the same as spot_risk
+                        'consolidated_var':        {'total_var': float, ...}
+                        'spot_risk':               {'total_var': float, ...} —
+                                                    used only by the Cash Book
+                                                    Risk card; deliberately NOT
+                                                    used for gross_standalone_sum
+                        'cumulative_vars':         dict — V3: per-period VaR and
+                                                    components
 
     Returns:
         A dict with keys: base_ccy, confidence, z_score, summary, buckets,

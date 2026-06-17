@@ -49,10 +49,17 @@ SECTION 2 — Unified bucketed risk (cash + forwards, covariance-adjusted):
 SECTION 3 — Gross attribution (reference, forwards only, no netting):
   Each forward exposure's standalone VaR at its bucket midpoint T, computed
   independently. Cash positions NOT included in Section 3 itself.
-  NOTE: dashboard_engine.py adds cash standalone VaRs (from Section 1's
-  simple-sum total_var) on top of Section 3 when computing the Gross Standalone
-  Risk stat card, so the dashboard baseline covers cash + forwards consistently
-  with consolidated_var (which also includes both). This is "Option A".
+  NOTE: dashboard_engine.py adds cash standalone VaRs — sourced from THIS
+  function's separate 'gross_cash_attribution' output below (computed at the
+  fixed CASH_CONSOLIDATED_T_DAYS horizon, NOT Section 1's spot_risk and NOT
+  the user-adjustable cash_horizon) — on top of Section 3 when computing the
+  Gross Standalone Risk stat card, so the dashboard baseline covers cash +
+  forwards consistently with consolidated_var (which also includes both).
+  This is "Option A". Sourcing this from spot_risk instead would silently
+  couple the Cash VaR Horizon dropdown to the Gross Standalone Risk / Risk
+  Reduction stat cards, even though that dropdown is documented to affect
+  only the standalone Cash Book Risk card — see CASH_CONSOLIDATED_T_DAYS
+  further down for the full rationale.
 
 === KEY CONCEPTS ===
 

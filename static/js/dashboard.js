@@ -854,10 +854,25 @@ function _renderHedgeTableEmpty(tbody) {
 // FORMATTING UTILITIES
 // ============================================================
 
-/** Formats a number with comma separators, 0 decimal places. */
+/**
+ * Formats a number with comma separators, 0 decimal places.
+ *
+ * NEGATIVE-ZERO FIX: Math.round() on a tiny negative float (e.g. -0.0003,
+ * the kind of floating-point noise that survives Python's round(x, 2) as
+ * -0.0 and travels through JSON as -0) returns JS's negative-zero value.
+ * (-0).toLocaleString('en-US') renders the literal string "-0" — this is
+ * what caused values that are mathematically zero to display as "SGD -0"
+ * in the UI. The `=== 0` check below catches BOTH +0 and -0 (JS treats
+ * them as equal under ==/===, unlike Object.is), so replacing the rounded
+ * value with a literal `0` before formatting normalises every such case.
+ * This is a formatter-level fix, so it protects every number that flows
+ * through fmtNum() — not just the one field that previously triggered this
+ * (hedge_benefit) — including any new field a future developer adds here.
+ */
 function fmtNum(n) {
     if (n === undefined || n === null || isNaN(n)) return '—';
-    return Math.round(n).toLocaleString('en-US');
+    const rounded = Math.round(n);
+    return (rounded === 0 ? 0 : rounded).toLocaleString('en-US');
 }
 
 /**
@@ -868,11 +883,17 @@ function fmt(n) {
     return fmtNum(n);
 }
 
-/** Compact axis tick format: 1500000 → "1.5M", 25000 → "25K". */
+/**
+ * Compact axis tick format: 1500000 → "1.5M", 25000 → "25K".
+ * Same negative-zero guard as fmtNum() — see that function's docstring.
+ * Without this, a tiny negative value below the K/M thresholds would fall
+ * through to `v.toFixed(0)`, and (-0.4).toFixed(0) renders as "-0".
+ */
 function fmtShort(v) {
     const a = Math.abs(v);
     if (a >= 1_000_000) return (v / 1_000_000).toFixed(1) + 'M';
     if (a >= 1_000)     return (v / 1_000).toFixed(0) + 'K';
+    if (Math.abs(v) < 0.5) v = 0;   // normalise -0 / sub-unit noise before toFixed(0)
     return v.toFixed(0);
 }
 
