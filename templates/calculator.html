@@ -181,27 +181,75 @@
      .cash-cols → Currency | Balance (flexible) | Delete button
      .exp-cols  → Currency | Amount (flexible) | Settlement Date | Direction | Delete button
 
-     MOBILE FIX (Option A): the flexible column below is minmax(110px, 1fr)
+     MOBILE FIX (Option A): the flexible column below is minmax(160px, 1fr)
      rather than a bare 1fr. A bare 1fr is allowed to shrink all the way to
      0 — and because .grid-td sets min-width:0 (a few lines down), browsers
      will actually do that rather than overflow, which is exactly why the
      Amount/Balance input was collapsing to nothing on phones even before
-     the overflow:hidden clipping kicked in. minmax(110px, 1fr) keeps the
+     the overflow:hidden clipping kicked in. minmax(160px, 1fr) keeps the
      SAME behaviour as before whenever there's room — it still fills any
-     extra space exactly like 1fr — but refuses to shrink past 110px
-     (enough to comfortably type a number). Once that floor is hit on a
-     narrow screen, the grid's total width exceeds the screen's width, and
-     .table-wrapper's overflow-x:auto (above) takes over and makes the row
-     scrollable instead of crushing the input. On a laptop there's always
-     way more than 110px of spare room, so this is a no-op there — pixel-
-     for-pixel the same layout as before. */
-  .cash-cols { grid-template-columns: 130px minmax(110px, 1fr) 48px; }
-  .exp-cols  { grid-template-columns: 130px minmax(110px, 1fr) 160px 140px 48px; }
+     extra space exactly like 1fr — but refuses to shrink past 160px. Once
+     that floor is hit on a narrow screen, the grid's total width exceeds
+     the screen's width, and .table-wrapper's overflow-x:auto (above) takes
+     over and makes the row scrollable instead of crushing the input. On a
+     laptop there's always way more than 160px of spare room, so this is a
+     no-op there — pixel-for-pixel the same layout as before.
+
+     WHY 160px AND NOT 110px: this floor is the column's TOTAL width, not
+     the space available for digits — .grid-td's own padding (16px each
+     side) and .cell-input's padding (8px each side) together consume 48px
+     of it before a single character is drawn. At 110px that left only
+     ~62px for text, enough for roughly 7-8 characters at this 13px
+     monospace font — not enough for a 9-figure amount like "2,000,000",
+     which is exactly why it was visibly clipping ("2,000,0…") rather than
+     being a rendering bug. 160px leaves ~112px for digits, comfortably
+     fitting 9-figure amounts (e.g. "100,000,000") with room to spare.
+
+     min-width below is the OTHER half of the header-background fix
+     further down (see the comment on .grid-header/.grid-row): it's set
+     here, per grid type, as a literal px sum of that type's own columns
+     (130+160+48 for cash, 130+160+160+140+48 for exposures) rather than
+     via `width: max-content` on the shared rule. max-content was tried
+     first and reverted — it produces a well-defined size for fixed-px
+     tracks, but there's no equally well-defined answer to "how wide does
+     a flexible 1fr track want to be with unlimited room," since by
+     definition it just fills whatever's available; this rendered as a
+     correct fix on the phone-width test but an enormous blowout on
+     desktop in practice. A literal min-width has no such ambiguity:
+     browsers still use ordinary width:auto (the default — fill the
+     available space, exactly like before) whenever that's wider than the
+     floor, which is every desktop/tablet case, so this floor only
+     actually engages once available space drops below it — i.e. only on
+     phone widths, which is the one case it's meant for. */
+  .cash-cols { grid-template-columns: 130px minmax(160px, 1fr) 48px;               min-width: 338px; }
+  .exp-cols  { grid-template-columns: 130px minmax(160px, 1fr) 160px 140px 48px;   min-width: 638px; }
 
   .grid-header,
   .grid-row {
-    display: grid;
+    display:    grid;
     align-items: center;
+    /* WIDTH FIX: a grid container's own box (block-level by default) is
+       width:auto — same as a normal div, it fills .table-wrapper's
+       available width rather than expanding to whatever its columns
+       actually need. grid-template-columns can demand more than that on
+       a narrow phone (e.g. 638px for the exposures grid) — the grid's
+       CONTENT still renders fine via overflow (that's what made the row
+       scrollable at all), but a background-color only ever paints within
+       an element's OWN box, not into the area its children have
+       overflowed past. That's what caused .grid-header's grey background
+       to visibly stop partway across the row (right at its own
+       width:auto edge) while the Direction column kept rendering past
+       that point with no background behind it — not a missing rule, just
+       a box narrower than its own content.
+
+       The actual fix is the min-width set above on .cash-cols/.exp-cols,
+       NOT anything here — width is deliberately left at its default
+       (auto) on this shared rule. auto already does the right thing on
+       its own once a min-width floor exists: it fills the available
+       space when there's room (desktop/tablet — identical to before this
+       whole fix), and gets clamped up to the min-width floor once
+       available space drops below it (phone widths), which is exactly
+       the one case that needed fixing. */
   }
   .grid-header {
     font-family: var(--mono);

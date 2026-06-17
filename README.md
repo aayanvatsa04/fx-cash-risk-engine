@@ -458,6 +458,14 @@ appears in the consolidated portfolio VaR via ρ=1 and opposite-signed exposures
 
 ## Known Limitations (PoC)
 
+This table is for things that are still actually true about the current
+build — open gaps, deliberate PoC tradeoffs, and known approximations.
+Once something here gets fixed, the row moves out of this table and into
+Changes Made below, rather than being marked "✅ Fixed" in place — that
+keeps this table a reliable list of what to still watch out for, instead
+of a mix of "still a problem" and "no longer a problem" rows that a future
+developer has to read carefully to tell apart.
+
 | Limitation | Status | Planned fix |
 |---|---|---|
 | yfinance is an unofficial scrape — can break without notice | ⚠️ Open | Replace with FRED + CurrencyLayer or Bloomberg API |
@@ -466,23 +474,38 @@ appears in the consolidated portfolio VaR via ρ=1 and opposite-signed exposures
 | No public holiday calendar — counts Mon–Fri only | ⚠️ Open | Market-specific calendar (SGX, NYSE, MAS) |
 | Vol slider approximates during simulation (no covariance recomputation in browser) | ⚠️ By design (PoC) | Add /simulate endpoint or pass correlation matrix to frontend |
 | Gross standalone uses bucket-midpoint T for forwards (slight overstatement) | ⚠️ Known, disclosed | Recompute at actual T for clean apples-to-apples |
-| Simple sum across currencies within a bucket (assumes perfect correlation) | ✅ Fixed V2.2 | Covariance matrix now applied within each bucket |
-| Cash vs forward netting not implemented | ✅ Fixed V2.3 | Cash routed into Bucket 1 as synthetic receivables |
-| Cross-horizon VaR aggregation (combining bucket VaRs with different T) | ✅ Fixed V2.4 | Exact individual-position covariance with min(Ti,Tj) cross-terms |
-| Dashboard bucket filter shows one bucket at a time | ✅ Fixed V3 | Cumulative period filter with period-level Component CFaR decomposition |
-| Separate blue CFaR bar distorted chart when notional and CFaR on different scales | ✅ Fixed V3 | Component CFaR printed as text label inside each bar |
-| Cash excluded from gross standalone baseline (scope mismatch with portfolio VaR) | ✅ Fixed | Cash standalone VaRs now included in gross baseline (Option A) |
-| CFaR labels inside bars only visible on hover | ✅ Fixed | Labels render immediately on chart load (chart.update after _cfarValues set) |
-| Floating-point noise producing "SGD -0" for values that are mathematically zero | ✅ Fixed (root cause) | Originally point-fixed only in dashboard_engine.py's `hedge_benefit` field via `max(benefit, 0.0)`; recurred in a different field, since JS's `(-0).toLocaleString()` renders the literal string "-0" for ANY tiny negative float that survives rounding. Fixed properly at the shared formatting chokepoint instead: `fmtNum()`/`fmtShort()` in dashboard.js and `fmt()`/`fmtC()` in calculator.html all now normalise values within half a cent/unit of zero to a real `0` before formatting — this protects every numeric display in the app, including any new field a future developer adds, not just the one that happened to trigger this twice |
-| Cash Positions / Future Exposures input grids and Hedge Effectiveness table clipped or crushed their own content on phone-width screens | ✅ Fixed | `overflow-x:auto` horizontal scroll added (`.table-wrapper` in calculator.html, `.hedge-table-wrapper` in dashboard.css) with a `minmax(110px, 1fr)` floor on flexible input columns so fields scroll into view instead of collapsing to nothing |
-| Bucket Breakdown / Cash Positions result rows and the Known Limitations table were unreadable or clipped on phone-width screens | ✅ Fixed | CSS-only vertical stack reflow below 640px (`.breakdown-row`, `.ccy-row-top`, `.limitations-table`) — labels injected via `::before`/`nth-child`, no HTML duplication; the JS render functions are unchanged and still only need editing in one place |
-| Duplicate Component CFaR tooltip, and a tooltip icon rendering pinned to the page's corner instead of next to the chart legend it explains | ✅ Fixed | Merged the duplicate explainer into one; added a scoped `position:relative` fix for `.legend-item .dash-tooltip-icon` (it was inheriting `position:absolute` from a rule designed only for the stat-card-corner use case, with no positioned ancestor to anchor to) |
-| Component CFaR bar labels could overflow their own bar on narrow (phone-width) charts | ✅ Fixed | `isNarrowChart()` helper switches the label to an abbreviated K/M format and a smaller font below a 500px chart-width threshold; unaffected on laptop/tablet widths |
-| Dead/duplicate CSS left over from a `.dash-`-prefix rename (`.dir-badge`, `.eff-bar-wrap/bg/fill`), and a `.direction-recv` selector that never matched its actual generated class name (`.direction-receivable`) | ✅ Fixed | Removed the confirmed-unused duplicates from dashboard.css; renamed the mismatched selector in calculator.html to the value the `<option>` element actually uses (no visible change — the fallback colour happened to already match) |
-| Design tokens (`:root`) were duplicated in both dashboard.css and calculator.html with identical values — currently harmless, but dashboard.css's own comment claimed "change the `:root` block only," which wasn't true while a second copy existed and would silently win the cascade | ✅ Fixed | Removed calculator.html's duplicate; dashboard.css's `:root` (a strict superset — it already had every variable calculator.html needed, plus `--teal`/`--long`/`--short`/`--flat`) is now the single source of truth the comment always claimed it was |
-| Cash Positions / Future Exposures table headers misaligned with their columns | ✅ Fixed | Rebuilt as CSS Grid (see Frontend Architecture Note below); unscoped table CSS in dashboard.css now scoped to .hedge-section |
-| Risk Reduction info tooltip popup clipped/cut off | ✅ Fixed | Removed overflow:hidden from .stat-card (was clipping the tooltip); accent strip given its own border-radius instead |
-| Cash VaR Horizon dropdown silently affected Consolidated VaR, Risk Dashboard stat cards, and Component CFaR bars (not just Cash Book Risk) | ✅ Fixed | Cash now uses a fixed CASH_CONSOLIDATED_T_DAYS=10 everywhere except Section 1; new calculate_gross_cash_var() decouples Gross Standalone Risk's cash component too |
+
+---
+
+## Changes Made
+
+A running log of everything that's been fixed, in roughly the order it
+happened. New entries get **appended to the bottom** of this table — that
+way the file's own edit history (oldest change at the top, newest at the
+bottom) matches how you'd read a normal changelog, and there's never a
+question of where a new row goes.
+
+| Change | Detail |
+|---|---|
+| Covariance matrix applied within each bucket (V2.2) | Replaced the simple sum across currencies within a bucket, which had assumed perfect correlation |
+| Cash routed into Bucket 1 as synthetic receivables (V2.3) | Implemented cash vs. forward netting, which wasn't previously possible |
+| Exact individual-position covariance with min(Tᵢ,Tⱼ) cross-terms (V2.4) | Replaced naively summing bucket VaRs across different time horizons, which can't be meaningfully aggregated that way |
+| Cumulative period filter with period-level Component CFaR decomposition (V3) | Replaced the old per-bucket dropdown, which only showed one bucket at a time |
+| Component CFaR printed as a text label inside each bar (V3) | Replaced the separate blue CFaR bar, which distorted the chart whenever notional and CFaR sat on very different scales |
+| Cash standalone VaRs included in the Gross Standalone Risk baseline (Option A) | Previously excluded, creating a scope mismatch against the Consolidated Portfolio VaR baseline it's compared to |
+| Component CFaR labels inside bars now render immediately on chart load | Previously only appeared on hover; fixed via `chart.update('none')` after `_cfarValues` is set |
+| "SGD -0" display bug fixed at the root | Originally point-fixed only in `dashboard_engine.py`'s `hedge_benefit` field via `max(benefit, 0.0)`; recurred in a different field, since JS's `(-0).toLocaleString()` renders the literal string "-0" for any tiny negative float that survives rounding. Fixed properly at the shared formatting chokepoint instead: `fmtNum()`/`fmtShort()` in dashboard.js and `fmt()`/`fmtC()` in calculator.html all now normalise values within half a cent/unit of zero to a real `0` before formatting |
+| Horizontal scroll added to input grids and the Hedge Effectiveness table | Previously clipped or crushed their own content on phone-width screens; `overflow-x:auto` (`.table-wrapper` in calculator.html, `.hedge-table-wrapper` in dashboard.css) with a `minmax` floor on the flexible column lets fields scroll into view instead of collapsing to nothing |
+| Vertical stack reflow for result cards and the Known Limitations table on phone-width screens | CSS-only, below 640px (`.breakdown-row`, `.ccy-row-top`, `.limitations-table`) — labels injected via `::before`/`nth-child`, no HTML duplication; the JS render functions are unchanged |
+| Duplicate Component CFaR tooltip merged into one; tooltip positioning bug fixed | A tooltip icon was rendering pinned to the page's corner instead of next to the chart legend it explains, because it inherited `position:absolute` with no positioned ancestor to anchor to |
+| Component CFaR bar labels abbreviated on narrow charts | `isNarrowChart()` switches to a compact K/M format and smaller font below a 500px chart-width threshold, preventing the label from overflowing past its own bar |
+| Dead/duplicate CSS removed (`.dir-badge`, `.eff-bar-wrap/bg/fill`); `.direction-recv` renamed to `.direction-receivable` | Leftovers from an earlier `.dash-`-prefix rename; the renamed selector had never matched its actual generated class name (no visible change, since the fallback colour happened to already match) |
+| Design tokens (`:root`) consolidated into dashboard.css only | Was duplicated in both dashboard.css and calculator.html with identical values; dashboard.css's own comment claimed "change the `:root` block only," which wasn't true while a second copy existed and would have silently won the cascade |
+| Amount/Balance input columns widened on mobile | The flexible column's floor (`minmax(110px, 1fr)`) only left ~62px for digits after padding, clipping 9-figure amounts (e.g. "2,000,000" displayed as "2,000,0…"); widened to `minmax(160px, 1fr)` |
+| Future Exposures table header background fixed to span its full scrollable width | `.grid-header`/`.grid-row` had no explicit width, so their box stretched to the viewport instead of their actual (wider) grid content — backgrounds only paint within an element's own box, not its children's overflow, which created a visible seam partway across the row; fixed with `width: max-content` |
+| Cash Positions / Future Exposures table headers rebuilt as CSS Grid | Native `<table>` column widths could drift from body row widths depending on browser/zoom; unscoped table CSS in dashboard.css is now scoped to `.hedge-section` so it can't leak onto these grids either |
+| Risk Reduction info tooltip popup fixed | Was clipped/cut off by `overflow:hidden` on `.stat-card`; the accent strip was given its own border-radius instead so the card no longer needs to clip overflow |
+| Cash VaR Horizon dropdown decoupled from Consolidated VaR / Risk Dashboard / Component CFaR bars | Previously silently affected all of these, not just the Cash Book Risk card it's documented to affect; cash now uses a fixed `CASH_CONSOLIDATED_T_DAYS = 10` everywhere except Section 1, with a new `calculate_gross_cash_var()` decoupling Gross Standalone Risk's cash component too |
 
 ---
 
