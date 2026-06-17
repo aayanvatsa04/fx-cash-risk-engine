@@ -135,14 +135,35 @@
   }
   .config-field select:focus { border-color: var(--accent); }
 
-  /* ── TABLES (cash + exposures) ── */
+  /* ── TABLES (cash + exposures) ──
+     MOBILE FIX (Option A — horizontal scroll, see .cash-cols/.exp-cols below
+     for the matching half of this fix):
+     overflow-x:auto lets the grid scroll sideways if its minimum width can't
+     fit the screen, instead of overflow:hidden silently CLIPPING whatever
+     didn't fit (which was the original bug — on a phone the Direction
+     dropdown and the delete button were simply gone, not just hard to see).
+     On any screen wide enough that the grid already fits with room to spare
+     (laptop, tablet), this is visually IDENTICAL to overflow:hidden — a
+     scrollbar only appears once there's something to scroll to, so this is
+     safe to apply unconditionally rather than scoping it to a breakpoint. */
   .table-wrapper {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;   /* smooth momentum scroll on iOS */
     margin-bottom: 16px;
   }
+  /* Thin, unobtrusive scrollbar so a phone user can tell there's more
+     content to the right — pure CSS, no extra markup or JS needed. Browsers
+     that don't support these properties just fall back to their own
+     default scrollbar, so this degrades safely. */
+  .table-wrapper::-webkit-scrollbar       { height: 4px; }
+  .table-wrapper::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+  .table-wrapper::-webkit-scrollbar-track { background: transparent; }
+  .table-wrapper { scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+
   table { width: 100%; border-collapse: collapse; }
 
   /* ── INPUT TABLES (Cash Positions, Future Exposures) — CSS GRID, NOT <table> ──
@@ -165,9 +186,24 @@
      layout quirks.
 
      .cash-cols → Currency | Balance (flexible) | Delete button
-     .exp-cols  → Currency | Amount (flexible) | Settlement Date | Direction | Delete button */
-  .cash-cols { grid-template-columns: 130px 1fr 48px; }
-  .exp-cols  { grid-template-columns: 130px 1fr 160px 140px 48px; }
+     .exp-cols  → Currency | Amount (flexible) | Settlement Date | Direction | Delete button
+
+     MOBILE FIX (Option A): the flexible column below is minmax(110px, 1fr)
+     rather than a bare 1fr. A bare 1fr is allowed to shrink all the way to
+     0 — and because .grid-td sets min-width:0 (a few lines down), browsers
+     will actually do that rather than overflow, which is exactly why the
+     Amount/Balance input was collapsing to nothing on phones even before
+     the overflow:hidden clipping kicked in. minmax(110px, 1fr) keeps the
+     SAME behaviour as before whenever there's room — it still fills any
+     extra space exactly like 1fr — but refuses to shrink past 110px
+     (enough to comfortably type a number). Once that floor is hit on a
+     narrow screen, the grid's total width exceeds the screen's width, and
+     .table-wrapper's overflow-x:auto (above) takes over and makes the row
+     scrollable instead of crushing the input. On a laptop there's always
+     way more than 110px of spare room, so this is a no-op there — pixel-
+     for-pixel the same layout as before. */
+  .cash-cols { grid-template-columns: 130px minmax(110px, 1fr) 48px; }
+  .exp-cols  { grid-template-columns: 130px minmax(110px, 1fr) 160px 140px 48px; }
 
   .grid-header,
   .grid-row {
@@ -607,6 +643,22 @@
   }
   .assumptions strong { color: var(--text); font-weight: 500; }
 
+  /* Known Limitations table — this table's cells are styled entirely via
+     inline style="..." attributes (a one-off choice from when it was first
+     built, rather than a dedicated class), which is why this rule lives
+     separately rather than folded into a single .limitations-table block:
+     none of the inline styles set overflow-wrap, so there's no specificity
+     fight to override here. Without this, a long unbreakable technical
+     term (e.g. "pandas_market_calendars") has nowhere to break and simply
+     paints past the right edge of its own cell — which doesn't register
+     as scrollable overflow anywhere (overflow:visible doesn't affect
+     scrollWidth), so it can look fine in automated checks while visibly
+     spilling past the card on screen. This applies at every width, not
+     just mobile, since the same risk exists on desktop if a future
+     limitation entry uses an even longer unbroken term. */
+  .limitations-table td,
+  .limitations-table th { overflow-wrap: break-word; }
+
   /* fetch errors */
   .fetch-errors {
     padding: 12px 16px;
@@ -619,10 +671,102 @@
     display: none;
   }
 
+  /* =============================================================================
+     MOBILE LAYOUT — OPTION B: STACKED RESULTS CARDS
+     =============================================================================
+     Below 640px (phones), .breakdown-row (Cash Positions results) and
+     .ccy-row-top (Forward Bucket results) stop being a fixed-column grid —
+     which needed far more horizontal room than a phone has, and was either
+     crushing the VaR figure or getting clipped outright by the parent
+     card's overflow:hidden — and instead become a vertical stack: one
+     field per line, full width.
+
+     This is deliberately CSS-only. The JS in this file still generates the
+     exact same child <div>s (currency, position, spot/vol, VaR, attribution
+     rows) regardless of screen size — there is only ONE place that defines
+     what fields exist on a row. This stylesheet just decides how those
+     existing fields are ARRANGED at a given width. A future developer
+     adding or removing a field only ever has to touch the JS render
+     function once; nothing needs to be kept in sync in two places. */
   @media (max-width: 640px) {
-    .breakdown-row { grid-template-columns: 60px 1fr 1fr; }
-    .ccy-row-top   { grid-template-columns: 60px 1fr 1fr; }
-    .var-headline  { font-size: 36px; }
+
+    .var-headline { font-size: 36px; }
+
+    /* Cash Positions breakdown rows + Forward Bucket currency rows: same
+       grid → vertical stack transformation applies to both. */
+    .breakdown-row,
+    .ccy-row-top {
+      grid-template-columns: none;   /* stop using the desktop fixed grid */
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    /* The first child of both rows is the bare currency code (.bd-ccy,
+       e.g. "GBP") with no label of its own — size it up slightly so it
+       reads as a heading for the stacked fields beneath it, rather than
+       just another value in the list. */
+    .breakdown-row .bd-ccy,
+    .ccy-row-top   .bd-ccy {
+      font-size: 16px;
+    }
+
+    /* Attribution rows — the "← Payable  GBP 180,500.00  2026-11-30
+       SGD 14,820" lines under each bucket, and the position list under
+       Consolidated VaR (same .attr-row class, reused). Previously this
+       was a single unbreakable flex line that ran off the edge of the
+       screen. Allowing it to wrap, combined with the min-widths already
+       defined on .attr-dir / .attr-amt / .attr-date, makes it settle
+       naturally into two readable lines on a phone — direction + amount
+       on the first line, date + VaR on the second — with no markup
+       changes required. */
+    .attr-row {
+      flex-wrap: wrap;
+      row-gap: 4px;
+    }
+    .attr-var { margin-left: 0; }   /* auto-margin only makes sense on one line */
+
+    /* Known Limitations table — this is explanatory prose meant to be read
+       top to bottom (Limitation → what it means → suggested improvement),
+       not numeric data meant to be compared across columns at a glance —
+       unlike the Hedge Effectiveness table above, which stays as a
+       scrollable grid for exactly that comparison reason. So instead of
+       scrolling sideways through paragraph text (a genuinely bad reading
+       experience), this reflows into a vertical stack: each limitation
+       becomes its own block, with "What it means" / "Suggested
+       improvement" labelled and stacked beneath it.
+       Labels are injected via ::before keyed off column position
+       (nth-child) rather than added to the HTML, so the limitation text
+       itself still only ever lives in one place — this stylesheet just
+       changes how it's arranged, the same approach used for
+       .breakdown-row / .ccy-row-top above. The header row is hidden since
+       its three column labels would otherwise float stacked at the very
+       top, disconnected from the rows they describe — each cell now
+       carries its own label inline instead. */
+    .limitations-table thead { display: none; }
+
+    .limitations-table,
+    .limitations-table tbody,
+    .limitations-table tr,
+    .limitations-table td {
+      display: block;
+    }
+    .limitations-table tr {
+      padding: 8px 0;
+    }
+    .limitations-table td:first-child {
+      font-weight: 600;
+      font-size: 11.5px;
+    }
+    .limitations-table td:nth-child(2)::before {
+      content: "What it means — ";
+      color: var(--muted);
+    }
+    .limitations-table td:nth-child(3)::before {
+      content: "Suggested improvement — ";
+      color: var(--muted);
+    }
   }
 </style>
 </head>
@@ -718,9 +862,12 @@
     </div>
   </div>
   <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:16px">
-    Sets T for the standalone Cash Book VaR shown in results below.
-    Forward bucket calculations use each position's own actual
-    settlement date — this selector has no effect on them.
+    Sets T for the standalone Cash Book Risk card only — affects nothing
+    else on this page. Bucketed Risk Detail, Consolidated Portfolio VaR,
+    Gross Standalone Risk, Risk Reduction, and every Risk Dashboard period
+    view all use a fixed 10-trading-day horizon for cash, independent of
+    this dropdown. Forward exposures everywhere use each position's own
+    actual settlement date.
   </div>
 
   <!-- ── FUTURE EXPOSURES ── -->
@@ -809,9 +956,6 @@
         <div class="chart-title">
           Net Cashflow Exposure by Currency
           <span class="sub">Component CFaR printed inside each bar</span>
-          <!-- Tooltip explaining zero net exposure / non-zero CFaR — a common point
-               of confusion that is mathematically correct, not a bug. -->
-          <span class="dash-tooltip-icon" style="margin-left:6px;font-size:11px" data-tip="Component CFaR measures each currency's marginal contribution to total period risk, accounting for portfolio correlations — not its standalone exposure. A currency that hedges others in the portfolio can show low Component CFaR even with large net notional, because its risk is partially offset by other positions in the covariance matrix. This is correct, not a display error. For unhedged standalone risk per individual position, see the Bucketed Risk Detail section below. | A currency can also show zero net exposure but still carry a non-zero Component CFaR when positions settle at different dates. For example, a receivable at T=43 days and a payable at T=100 days cancel in notional but NOT in risk — the payable runs 57 extra days uncovered after the receivable settles. The min(Tᵢ,Tⱼ) covariance formula captures this: cross-term uses min(43,100)=43, so the two positions do not fully offset. Zero-notional labels appear in blue above the baseline.">ⓘ</span>
         </div>
         <select id="periodSelect" class="bucket-select"></select>
       </div>
@@ -837,10 +981,13 @@
           <div class="legend-dot" style="background:rgba(107,114,128,0.5)"></div>
           Flat (fully netted in this window)
         </div>
-        <!-- Tooltip explaining why component CFaR can sometimes be negative -->
+        <!-- Single tooltip explaining Component CFaR — there used to be a second,
+             overlapping one on the chart heading above (same concept, slightly
+             different wording); the unique points from both have been merged
+             into this one so there's only ever one explanation to keep in sync. -->
         <div class="legend-item" style="margin-left:auto;color:var(--muted);font-size:10px;cursor:default">
           Component CFaR printed inside bars
-          <span class="dash-tooltip-icon" style="font-size:11px;margin-left:4px" data-tip="Component CFaR is each currency's marginal contribution to Period VaR, derived from the full covariance matrix. It answers: how much does this currency add to total portfolio risk given its correlations with every other currency? It can occasionally be a small negative number — this means the position is acting as a portfolio hedge (reducing overall variance). Negative components are floored at zero in the chart for clarity but are included in the Period VaR total, which can therefore be slightly lower than the sum of visible bar heights. The bars and Period VaR total always remain consistent with each other.">ⓘ</span>
+          <span class="dash-tooltip-icon" style="font-size:11px;margin-left:4px" data-tip="Component CFaR is each currency's marginal contribution to Period VaR, derived from the full covariance matrix — not its standalone exposure. A currency that hedges others in the portfolio can show low Component CFaR even with large net notional, because its risk is partially offset elsewhere in the matrix; this is correct, not a display error. A currency can also show zero net exposure but still carry a non-zero Component CFaR when positions settle at different dates — for example, a receivable at T=43 days and a payable at T=100 days cancel in notional but not in risk, since the payable runs 57 extra days uncovered after the receivable settles (the min(Tᵢ,Tⱼ) covariance formula captures this: cross-term uses min(43,100)=43). Negative components are floored at zero in the chart for clarity but are still included in the Period VaR total, so the total can be slightly lower than the sum of visible bar heights — the bars and total always remain mutually consistent. Zero-notional bars with a non-zero label appear in blue. For unhedged standalone risk per individual position, see the Bucketed Risk Detail section below.">ⓘ</span>
         </div>
       </div>
 
@@ -942,16 +1089,18 @@
         vol shifts). Cross-bucket same-currency netting appears only in the
         consolidated Portfolio VaR above.
       </p>
-      <table>
-        <thead>
-          <tr>
-            <th>Currency</th><th>Bucket</th><th>Net Exposure</th>
-            <th>Net CFaR</th><th>Gross CFaR</th>
-            <th>Hedge Benefit</th><th>Effectiveness</th>
-          </tr>
-        </thead>
-        <tbody id="dashHedgeTableBody"></tbody>
-      </table>
+      <div class="hedge-table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Currency</th><th>Bucket</th><th>Net Exposure</th>
+              <th>Net CFaR</th><th>Gross CFaR</th>
+              <th>Hedge Benefit</th><th>Effectiveness</th>
+            </tr>
+          </thead>
+          <tbody id="dashHedgeTableBody"></tbody>
+        </table>
+      </div>
     </div>
 
   </div><!-- /#results-dashboard -->
@@ -1082,10 +1231,12 @@
 
     <strong>Gross Standalone Risk:</strong>
     Sum of all individual position VaRs with no netting and no cross-currency diversification
-    (perfect correlation assumed). Includes cash at cash_horizon T and forwards at bucket-midpoint T.
-    Compared against Consolidated Portfolio VaR to produce the Risk Reduction percentage.
-    The T mismatch (bucket-midpoint for forwards vs actual T in consolidated) slightly overstates
-    the gross baseline, making risk reduction marginally approximate.<br><br>
+    (perfect correlation assumed). Includes cash at a fixed 10-trading-day horizon (identical
+    to what Consolidated VaR uses for cash — independent of the Cash VaR Horizon dropdown above)
+    and forwards at bucket-midpoint T. Compared against Consolidated Portfolio VaR to produce the
+    Risk Reduction percentage. The one remaining approximation is on the forwards side: bucket-midpoint
+    T in the gross baseline vs each position's actual settlement T in Consolidated VaR, which slightly
+    overstates the gross baseline and makes risk reduction marginally approximate.<br><br>
 
     <strong>Market data:</strong>
     Daily closing prices from Yahoo Finance (yfinance) over the user-selected lookback period
@@ -1096,7 +1247,7 @@
 
     <strong>Known limitations and suggestions for future development:</strong>
 
-    <table style="width:100%;border-collapse:collapse;margin-top:10px;font-family:var(--mono);font-size:10.5px;line-height:1.7">
+    <table class="limitations-table" style="width:100%;border-collapse:collapse;margin-top:10px;font-family:var(--mono);font-size:10.5px;line-height:1.7">
       <thead>
         <tr>
           <th style="text-align:left;padding:6px 12px 6px 0;color:var(--muted);font-weight:500;border-bottom:1px solid var(--border);width:22%">Limitation</th>

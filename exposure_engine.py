@@ -199,9 +199,14 @@ def trading_days_to_date(n_days: int) -> str:
     The inverse of count_trading_days: given n trading days, returns the
     calendar date that is n business days (Mon–Fri) from today.
 
-    Used in calculate_fx_var to convert a cash_horizon (in trading days)
-    into a synthetic settlement date, so cash positions can be treated as
-    receivables in the forward bucket netting engine.
+    Used in calculate_fx_var with a fixed value of 1 trading day to convert
+    each cash position into a synthetic settlement date one day from today,
+    so cash positions can be routed into Bucket 1 (0–21 days) alongside any
+    same-currency near-term forward obligations for netting purposes. This
+    routing date is intentionally NOT derived from cash_horizon — see
+    CASH_CONSOLIDATED_T_DAYS and _build_individual_positions_list for the
+    separate, fixed T convention used once cash is inside the forward
+    bucketing / consolidated VaR / dashboard engines.
 
     Args:
         n_days: Number of trading days from today (must be ≥ 1).
@@ -900,12 +905,167 @@ def _add_covariance_to_spot_risk(
 # SHARED HELPERS — used by both consolidated VaR and cumulative period VaR
 # =============================================================================
 
+# =============================================================================
+# CASH_CONSOLIDATED_T_DAYS — fixed cash horizon for Consolidated VaR and the
+# cumulative-period Dashboard views (Component CFaR chart, Portfolio VaR,
+# Gross Standalone Risk, Risk Reduction).
+# =============================================================================
+#
+# === WHY THIS EXISTS ===
+#
+# The Cash VaR Horizon dropdown on the page is documented to the user as
+# affecting ONLY the standalone Cash Book Risk card ("Section 1"). Before this
+# constant was introduced, _build_individual_positions_list silently used the
+# user's cash_horizon selection as the T for cash positions wherever it was
+# called — including from calculate_consolidated_portfolio_var AND
+# calculate_cumulative_period_vars (which powers every Dashboard period view).
+# This meant changing the Cash VaR Horizon dropdown — meant to be an isolated,
+# independent setting for one specific card — silently changed the Consolidated
+# Portfolio VaR, the Gross Standalone Risk baseline, the Risk Reduction
+# percentage, and every Component CFaR bar in the dashboard chart for any
+# period that includes cash. Worse: if cash_horizon was set HIGHER than a
+# given period's cutoff (e.g. cash_horizon=63 days while viewing "Next 1
+# month", cutoff=21 days), cash positions were filtered out of that period
+# entirely — disappearing from both the bar chart's notional and its CFaR,
+# despite being held right now and obviously part of any near-term exposure.
+#
+# === THE FIX ===
+#
+# Cash's T inside _build_individual_positions_list (and therefore inside
+# Consolidated VaR and every cumulative-period Dashboard calculation) is now
+# a FIXED constant, completely decoupled from the Cash VaR Horizon dropdown.
+# The value chosen — 10 trading days — matches the Bucket 1 midpoint already
+# used by calculate_bucketed_forward_var (Bucketed Risk Detail / "Section 2"),
+# so cash is now treated identically wherever it appears outside the one
+# section explicitly designed to let the user vary its horizon. This also
+# resolves a separate, pre-existing inconsistency where Bucketed Risk Detail
+# (fixed T=10) and Consolidated VaR (previously cash_horizon) disagreed with
+# each other on cash's horizon.
+#
+# === RESULT ===
+#
+# The Cash VaR Horizon dropdown now affects ONLY the Cash Book Risk card
+# (Section 1) — exactly as the UI's own helper text claims. Every other
+# number on the page (Bucketed Risk Detail, Consolidated Portfolio VaR, the
+# Risk Dashboard's stat cards, the Component CFaR chart for every period) is
+# completely unaffected by this dropdown, because none of them call
+# calculate_portfolio_var with cash_horizon any more — they all flow through
+# _build_individual_positions_list, which now uses this fixed constant.
+CASH_CONSOLIDATED_T_DAYS = 10
+
+
+def calculate_gross_cash_var(
+    cash_positions: list[dict],
+    base_ccy:       str,
+    market_data:    dict,
+    confidence:     float,
+) -> tuple[float, list[dict], list[dict]]:
+    """
+    Computes standalone VaR for each cash position INDEPENDENTLY, at the
+    fixed CASH_CONSOLIDATED_T_DAYS horizon (10 trading days) — deliberately
+    NOT the user-adjustable Cash VaR Horizon dropdown (cash_horizon), which
+    affects only the standalone Cash Book Risk card (Section 1).
+
+    === WHY THIS EXISTS ===
+
+    This is the cash counterpart to calculate_gross_forward_var (which
+    computes the forwards-only standalone sum for Section 3 / the Gross
+    Standalone Risk stat card). Before this function existed, the dashboard
+    sourced cash's contribution to Gross Standalone Risk from
+    spot_risk['total_var'] — Section 1's own output, computed at the
+    user-selected cash_horizon. That made the Gross Standalone Risk stat
+    card (and therefore Risk Reduction, since Risk Reduction =
+    gross_standalone_sum − consolidated_var) silently drift whenever the
+    user changed the Cash VaR Horizon dropdown — even though that dropdown
+    is documented, and intended, to affect ONLY the standalone Cash Book
+    Risk card. Those two headline dashboard figures should be stable,
+    reportable numbers that a stakeholder can trust are not moving because
+    of an unrelated, exploratory control elsewhere on the page.
+
+    This function gives the dashboard a cash standalone VaR computed at the
+    SAME fixed T=10 convention used everywhere else outside Section 1
+    (Bucketed Risk Detail, Consolidated Portfolio VaR, every cumulative
+    period view) — see the CASH_CONSOLIDATED_T_DAYS comment above for the
+    full rationale. Mirrors calculate_gross_forward_var's return shape so
+    dashboard_engine.py can sum the two sources identically.
+
+    Args:
+        cash_positions: List of cash position dicts (currency, balance).
+        base_ccy:       Company home currency.
+        market_data:    Pre-fetched market data from fetch_market_data_batch().
+                        Avoids re-fetching the same pair multiple times.
+        confidence:     VaR confidence level.
+
+    Returns:
+        A tuple of:
+            - total_gross_var (float): sum of all per-position standalone VaRs
+            - results (list[dict]):    per-position breakdown (see fields below)
+            - errors  (list[dict]):    positions that failed, with reasons
+
+        Each result dict contains:
+            'currency', 'balance', 't_used' (always CASH_CONSOLIDATED_T_DAYS),
+            'spot_rate', 'exposure_base', 'annualised_vol', 'daily_mean',
+            'annualised_mean', 'var', 'var_raw', 'var_was_floored',
+            'used_cross_rate'
+    """
+    results   = []
+    errors    = []
+    total_var = 0.0
+
+    for pos in cash_positions:
+        ccy     = pos['currency'].upper().strip()
+        balance = float(pos['balance'])
+
+        # Skip base currency positions — no FX risk
+        if ccy == base_ccy.upper():
+            continue
+
+        # Look up pre-fetched market data
+        md = market_data.get(ccy)
+        if md is None or md['error'] is not None:
+            errors.append({'currency': ccy,
+                           'reason': md['error'] if md else 'Not fetched'})
+            continue
+
+        # Convert to base currency: exposure_base = balance × spot_rate
+        exposure_base = balance * md['spot_rate']
+
+        # Cash is always 'long' — holder fears FCY depreciation (left tail)
+        var_floored, var_raw = calculate_parametric_var(
+            exposure_amount    = exposure_base,
+            annualised_vol     = md['ann_vol'],
+            daily_mean_return  = md['daily_mean'],
+            confidence_level   = confidence,
+            days               = CASH_CONSOLIDATED_T_DAYS,
+            direction          = 'long',
+        )
+
+        total_var += var_floored
+        ann_mean   = md['daily_mean'] * TRADING_DAYS_PER_YEAR
+
+        results.append({
+            'currency':         ccy,
+            'balance':          balance,
+            't_used':           CASH_CONSOLIDATED_T_DAYS,
+            'spot_rate':        round(float(md['spot_rate']),    6),
+            'exposure_base':    round(float(exposure_base),      2),
+            'annualised_vol':   round(float(md['ann_vol']),      6),
+            'daily_mean':       round(float(md['daily_mean']),   8),
+            'annualised_mean':  round(float(ann_mean),           4),
+            'var':              round(float(var_floored),        2),
+            'var_raw':          round(float(var_raw),            2),
+            'var_was_floored':  bool(var_raw < 0),
+            'used_cross_rate':  bool(md['used_cross_rate']),
+        })
+
+    return round(float(total_var), 2), results, errors
+
+
 def _build_individual_positions_list(
     cash_positions: list[dict],
     exposures:      list[dict],
     base_ccy:       str,
     market_data:    dict,
-    cash_horizon:   int,
 ) -> list[dict]:
     """
     Builds the flat list of ALL individual positions for the covariance matrix.
@@ -928,7 +1088,11 @@ def _build_individual_positions_list(
 
     Cash positions:
         - direction: always 'long' (holder fears FCY depreciation)
-        - t_days:    cash_horizon (user-specified, e.g. 1 trading day)
+        - t_days:    CASH_CONSOLIDATED_T_DAYS (fixed at 10 trading days — matches
+                     the Bucket 1 midpoint used elsewhere in the engine, and is
+                     deliberately NOT the user-adjustable Cash VaR Horizon
+                     dropdown; see the CASH_CONSOLIDATED_T_DAYS comment above
+                     for the full rationale)
         - signed_base: + (positive: long exposure)
 
     Forward exposures:
@@ -948,7 +1112,6 @@ def _build_individual_positions_list(
         base_ccy:       Company home currency (e.g. 'SGD').
         market_data:    Pre-fetched market data dict from fetch_market_data_batch().
                         Must include 'ann_vol', 'daily_mean', 'spot_rate' per currency.
-        cash_horizon:   T in trading days for cash positions (from user input).
 
     Returns:
         List of position dicts. Each dict has:
@@ -964,7 +1127,7 @@ def _build_individual_positions_list(
     """
     all_positions = []
 
-    # --- Cash positions: always long, T = cash_horizon ---
+    # --- Cash positions: always long, T = CASH_CONSOLIDATED_T_DAYS (fixed) ---
     for pos in cash_positions:
         ccy = pos['currency'].upper().strip()
         if ccy == base_ccy.upper():
@@ -981,7 +1144,7 @@ def _build_individual_positions_list(
             'type':            'cash',
             'direction':       'long',
             'signed_base':     signed_base,
-            't_days':          cash_horizon,
+            't_days':          CASH_CONSOLIDATED_T_DAYS,
             'settlement_date': None,
             'ann_vol':         md['ann_vol'],
             'daily_mean':      md['daily_mean'],
@@ -1254,7 +1417,6 @@ def calculate_consolidated_portfolio_var(
     base_ccy:       str,
     market_data:    dict,
     confidence:     float,
-    cash_horizon:   int,
 ) -> dict:
     """
     Computes a single consolidated VaR across the ENTIRE portfolio — every cash
@@ -1279,7 +1441,10 @@ def calculate_consolidated_portfolio_var(
     Step 1 — Build individual position list:
         For each cash position:
             signed_base = balance × spot_rate   (always positive — long FCY)
-            T           = cash_horizon           (user-specified)
+            T           = CASH_CONSOLIDATED_T_DAYS (fixed at 10 trading days,
+                          matching the Bucket 1 midpoint — deliberately NOT
+                          the user-adjustable Cash VaR Horizon dropdown, which
+                          affects only the standalone Cash Book Risk card)
 
         For each forward exposure:
             signed_base = ±amount × spot_rate   (+ recv, − payable)
@@ -1355,7 +1520,6 @@ def calculate_consolidated_portfolio_var(
         base_ccy:       Company home currency.
         market_data:    Batch-fetched market data (must include 'returns' series).
         confidence:     VaR confidence level (e.g. 0.95).
-        cash_horizon:   T in trading days used for cash positions.
 
     Returns:
         {
@@ -1382,13 +1546,15 @@ def calculate_consolidated_portfolio_var(
     # no pre-netting. Delegated to the shared helper so that this function and
     # calculate_cumulative_period_vars always work from the SAME position list.
     # This guarantees that the 'all' period VaR equals consolidated_var exactly.
+    # cash_horizon is deliberately NOT passed here — cash's T inside this list
+    # is the fixed CASH_CONSOLIDATED_T_DAYS constant, independent of the user's
+    # Cash VaR Horizon dropdown. See CASH_CONSOLIDATED_T_DAYS for the rationale.
     # -------------------------------------------------------------------------
     all_positions = _build_individual_positions_list(
         cash_positions = cash_positions,
         exposures      = exposures,
         base_ccy       = base_ccy,
         market_data    = market_data,
-        cash_horizon   = cash_horizon,
     )
 
     if not all_positions:
@@ -1470,7 +1636,6 @@ def calculate_cumulative_period_vars(
     base_ccy:       str,
     market_data:    dict,
     confidence:     float,
-    cash_horizon:   int,
 ) -> dict:
     """
     Computes a consolidated VaR for each cumulative time window defined in
@@ -1537,7 +1702,6 @@ def calculate_cumulative_period_vars(
         market_data:    Pre-fetched market data from fetch_market_data_batch().
                         Must include 'ann_vol', 'daily_mean', 'spot_rate', 'returns'.
         confidence:     VaR confidence level (e.g. 0.95).
-        cash_horizon:   T in trading days for cash positions.
 
     Returns:
         Dict keyed by period key ('1m', '3m', '6m', '12m', 'all'). Each value:
@@ -1570,13 +1734,13 @@ def calculate_cumulative_period_vars(
     # Step 1: Build the complete individual position list once.
     # This is shared with calculate_consolidated_portfolio_var via the helper,
     # ensuring the 'all' period produces exactly the same result.
+    # cash_horizon is deliberately NOT passed here — see CASH_CONSOLIDATED_T_DAYS.
     # -------------------------------------------------------------------------
     all_positions = _build_individual_positions_list(
         cash_positions = cash_positions,
         exposures      = exposures,
         base_ccy       = base_ccy,
         market_data    = market_data,
-        cash_horizon   = cash_horizon,
     )
 
     # -------------------------------------------------------------------------
@@ -1681,12 +1845,18 @@ def calculate_cumulative_period_vars(
                 net_dir = 'flat'
 
             # Exposure-weighted average T (approximation for simulation sliders only).
-            # Example: USD cash (T=1, notional=1M) + USD forward recv (T=45, notional=2M)
-            #   effective_T = (1M×1 + 2M×45) / (1M + 2M) = 91M / 3M ≈ 30.3
+            # Example: USD cash (T=CASH_CONSOLIDATED_T_DAYS=10, notional=1M) +
+            #   USD forward recv (T=45, notional=2M)
+            #   effective_T = (1M×10 + 2M×45) / (1M + 2M) = 100M / 3M ≈ 33.3
+            # The fallback below (used only if total_abs_base is 0 — meaning no
+            # position actually contributed to this currency, an edge case that
+            # should not occur in practice) also uses the fixed constant rather
+            # than cash_horizon, for full consistency with the rest of this
+            # function's cash treatment.
             effective_T = (
                 acc['weighted_T_sum'] / acc['total_abs_base']
                 if acc['total_abs_base'] > 0
-                else float(cash_horizon)
+                else float(CASH_CONSOLIDATED_T_DAYS)
             )
 
             currencies[ccy] = {
@@ -1841,6 +2011,22 @@ def calculate_fx_var(
     )
 
     # -----------------------------------------------------------------------
+    # Step 4b: Cash's contribution to Gross Standalone Risk, at the fixed
+    # CASH_CONSOLIDATED_T_DAYS horizon — NOT cash_horizon. This keeps the
+    # Gross Standalone Risk / Risk Reduction dashboard cards fully isolated
+    # from the Cash VaR Horizon dropdown, which affects only Section 1
+    # (Cash Book Risk) above. See calculate_gross_cash_var's docstring.
+    # -----------------------------------------------------------------------
+    print("  Gross cash attribution (fixed T={} — independent of cash_horizon)…".format(
+        CASH_CONSOLIDATED_T_DAYS))
+    _, gross_cash_exposures, gross_cash_errors = calculate_gross_cash_var(
+        cash_positions = cash_positions,
+        base_ccy       = base_ccy,
+        market_data    = market_data,
+        confidence     = confidence,
+    )
+
+    # -----------------------------------------------------------------------
     # Step 5: Consolidated portfolio VaR (V2.4).
     # Single number across ALL positions (cash + all forwards) using variance
     # aggregation with per-currency exposure-weighted effective T values.
@@ -1849,6 +2035,13 @@ def calculate_fx_var(
     # bucket VaRs (which conflates different T values), each currency's net
     # position enters a single covariance matrix at its own effective T,
     # and the portfolio VaR is extracted once from the combined P&L distribution.
+    #
+    # NOTE: cash_horizon is deliberately NOT passed below. Cash's T inside
+    # this calculation is the fixed CASH_CONSOLIDATED_T_DAYS constant (10
+    # trading days), independent of the Cash VaR Horizon dropdown — that
+    # dropdown affects only Section 1 (Cash Book Risk) above. See the
+    # CASH_CONSOLIDATED_T_DAYS comment near _build_individual_positions_list
+    # for the full rationale.
     #
     # See calculate_consolidated_portfolio_var for full methodology details.
     # -----------------------------------------------------------------------
@@ -1859,7 +2052,6 @@ def calculate_fx_var(
         base_ccy       = base_ccy,
         market_data    = market_data,
         confidence     = confidence,
-        cash_horizon   = cash_horizon,
     )
 
     # -----------------------------------------------------------------------
@@ -1869,6 +2061,10 @@ def calculate_fx_var(
     # positions settling within the window. The 'all' period equals consolidated_var.
     # Also computes component VaR decomposition (per-currency risk attribution)
     # for the bar chart. See calculate_cumulative_period_vars for full details.
+    #
+    # NOTE: cash_horizon is deliberately NOT passed below, for the same reason
+    # as Step 5 above — every Dashboard period view (including the Component
+    # CFaR bars) is unaffected by the Cash VaR Horizon dropdown.
     # -----------------------------------------------------------------------
     print("  Step 6 — cumulative period VaRs (V3 dashboard filter)…")
     cumulative_vars = calculate_cumulative_period_vars(
@@ -1877,7 +2073,6 @@ def calculate_fx_var(
         base_ccy       = base_ccy,
         market_data    = market_data,
         confidence     = confidence,
-        cash_horizon   = cash_horizon,
     )
 
     return {
@@ -1905,6 +2100,16 @@ def calculate_fx_var(
         'gross_attribution': {
             'exposures': gross_exposures,
             'errors':    gross_errors,
+        },
+
+        # Cash's standalone VaR at the fixed CASH_CONSOLIDATED_T_DAYS horizon
+        # (10 trading days) — independent of the Cash VaR Horizon dropdown.
+        # Used by dashboard_engine.py as the cash component of Gross Standalone
+        # Risk, so that stat card (and Risk Reduction) stay fully isolated
+        # from cash_horizon, which affects only spot_risk above.
+        'gross_cash_attribution': {
+            'exposures': gross_cash_exposures,
+            'errors':    gross_cash_errors,
         },
 
         # Consolidated portfolio VaR (V2.4): single number across the full

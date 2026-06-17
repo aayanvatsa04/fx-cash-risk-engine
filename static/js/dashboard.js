@@ -419,13 +419,27 @@ function renderChartForPeriod(periodKey) {
                      * positions) is visually represented as zero bar height; the signed
                      * value is preserved in period_var and explained in the tooltip.
                      * Returns '' (empty) to hide the label if CFaR is effectively zero.
+                     *
+                     * MOBILE FIX: on narrow (phone-width) charts, drop the repeated
+                     * currency prefix — it's already shown once in the y-axis title
+                     * above the chart, so re-printing it inside every single bar is
+                     * redundant exactly when space is tightest — and switch to the
+                     * same abbreviated K/M format already used for the y-axis ticks
+                     * (fmtShort) instead of the fully comma-expanded number. This is
+                     * what actually makes the label narrow enough to fit inside its
+                     * own bar rather than overflowing past it and getting clipped by
+                     * the canvas edge. Wide (laptop) charts are completely unaffected
+                     * — see isNarrowChart() above for the threshold.
                      */
                     formatter: (value, ctx) => {
                         const cfarList = ctx.chart._cfarValues;
                         if (!cfarList) return '';
                         const cfar = cfarList[ctx.dataIndex] ?? 0;
                         if (Math.abs(cfar) < 1) return '';  // hide near-zero labels
-                        return `${baseCcy} ${fmtNum(Math.round(Math.abs(cfar)))}`;
+                        const amount = Math.round(Math.abs(cfar));
+                        return isNarrowChart(ctx.chart)
+                            ? fmtShort(amount)
+                            : `${baseCcy} ${fmtNum(amount)}`;
                     },
 
                     /**
@@ -471,11 +485,17 @@ function renderChartForPeriod(periodKey) {
                             : 'rgba(255, 255, 255, 0.92)'; // white: normal label inside bar
                     },
 
-                    font: {
+                    /**
+                     * font: 11px on charts with room to spare. Drops to 9px on narrow
+                     * (phone-width) charts so the shorter compact labels from the
+                     * formatter above have an even easier time fitting inside their
+                     * bar. See isNarrowChart() for the shared width threshold.
+                     */
+                    font: (ctx) => ({
                         family: "'DM Mono', monospace",
-                        size:   11,
+                        size:   isNarrowChart(ctx.chart) ? 9 : 11,
                         weight: '500',
-                    },
+                    }),
                     padding: { top: 4, bottom: 4, left: 6, right: 6 },
 
                     // hide label entirely if CFaR rounds to zero (nothing meaningful to show)
@@ -854,4 +874,27 @@ function fmtShort(v) {
     if (a >= 1_000_000) return (v / 1_000_000).toFixed(1) + 'M';
     if (a >= 1_000)     return (v / 1_000).toFixed(0) + 'K';
     return v.toFixed(0);
+}
+
+/**
+ * isNarrowChart(chart) — true when the Net Exposure chart's current
+ * rendered width is too narrow for the inside-bar Component CFaR labels
+ * to comfortably show their full "SGD 21,584"-style text without
+ * overflowing past their own bar's column.
+ *
+ * Used by the datalabels `formatter` and `font` callbacks in
+ * renderChartForPeriod() (see the chart config below) to switch to a
+ * compact label style — smaller font, abbreviated K/M number, no
+ * repeated currency prefix — on phone-width charts, while wider charts
+ * (laptop, tablet) keep showing the exact same full-precision labels as
+ * before. Chart.js re-evaluates context callbacks like these on every
+ * render, and the chart is `responsive: true`, so this is re-checked
+ * automatically on window resize / phone rotation, not just at load.
+ *
+ * 500px is an empirical threshold: with 5 currency bars sharing the
+ * chart's width, anything narrower than that leaves each bar's column
+ * too little room for an 11px-font "SGD 21,584"-style label to fit.
+ */
+function isNarrowChart(chart) {
+    return (chart?.width ?? Infinity) < 500;
 }

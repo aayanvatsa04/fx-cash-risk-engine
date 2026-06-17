@@ -84,7 +84,7 @@ and a USD payable in Bucket 2 do NOT net against each other here — they are
 in different buckets. Their cross-bucket netting shows up only in the
 consolidated V2.4 VaR (via ρ=1 and opposite signed exposures).
 
-=== GROSS STANDALONE RISK — SCOPE (Option A, final state) ===
+=== GROSS STANDALONE RISK — SCOPE (final state) ===
 
 gross_standalone_sum = forwards_standalone_sum + cash_standalone_sum
 
@@ -92,22 +92,41 @@ gross_standalone_sum = forwards_standalone_sum + cash_standalone_sum
                              (bucket midpoint T, no netting, no correlation)
                              Source: var_result['gross_attribution']['exposures']
 
-    cash_standalone_sum:     simple-sum of all cash position VaRs at cash_horizon T
+    cash_standalone_sum:     simple-sum of all cash position VaRs at the FIXED
+                             CASH_CONSOLIDATED_T_DAYS horizon (10 trading days)
                              (no diversification — same methodology as forwards)
-                             Source: var_result['spot_risk']['total_var']
-                             ('total_var' is the simple sum; 'total_var_cov' is
-                             the covariance-adjusted version — we use simple sum
-                             to stay consistent with the forwards methodology of
-                             assuming perfect correlation in the gross baseline)
+                             Source: var_result['gross_cash_attribution']['exposures']
+                             NOT var_result['spot_risk'] — see below.
 
 This makes gross_standalone_sum scope-consistent with consolidated_var, which
 also includes cash + forwards. The risk reduction percentage is therefore
 a clean apples-to-apples comparison.
 
-KNOWN METHODOLOGICAL NOTE: cash VaRs use cash_horizon T (typically 1 day),
-while forwards use bucket midpoint T. This is correct — it mirrors the exact T
-values used in the consolidated_var calculation for each respective position type.
-The bucket midpoint approximation for forwards is separately disclosed in the UI.
+=== WHY CASH HERE USES A FIXED T, NOT cash_horizon ===
+
+cash_standalone_sum is deliberately sourced from
+var_result['gross_cash_attribution'] (computed at the fixed
+CASH_CONSOLIDATED_T_DAYS = 10, matching the Bucket 1 midpoint convention used
+by Bucketed Risk Detail and Consolidated Portfolio VaR) rather than from
+var_result['spot_risk']['total_var'] (Section 1's own output, computed at the
+user-adjustable Cash VaR Horizon dropdown).
+
+This was a deliberate fix: the Cash VaR Horizon dropdown is documented to the
+user as affecting ONLY the standalone Cash Book Risk card. Sourcing this sum
+from spot_risk would have made the Gross Standalone Risk stat card — and
+therefore Risk Reduction, since Risk Reduction = gross_standalone_sum −
+consolidated_var — silently drift whenever the user changed that dropdown,
+even though it has nothing to do with those two headline figures. Both now
+use the same fixed cash convention as consolidated_var, so changing Cash VaR
+Horizon affects the Cash Book Risk card and nothing else on the page.
+
+KNOWN METHODOLOGICAL NOTE: cash VaRs use the fixed CASH_CONSOLIDATED_T_DAYS
+(10 days), while forwards use bucket midpoint T (which varies per exposure,
+10/42/95/189/315 depending on which bucket it falls in). Both conventions
+mirror the exact T values used in the consolidated_var calculation for each
+respective position type — see exposure_engine.py's CASH_CONSOLIDATED_T_DAYS
+comment for the full rationale. The bucket midpoint approximation for
+forwards is separately disclosed in the UI.
 
 === PORTFOLIO-LEVEL TOTAL RISK REDUCTION ===
 
@@ -115,7 +134,9 @@ The bucket midpoint approximation for forwards is separately disclosed in the UI
 
 where:
     gross_standalone_sum  = sum of all per-position standalone VaRs
-                            (forwards at bucket-midpoint T + cash at cash_horizon T)
+                            (forwards at bucket-midpoint T + cash at the
+                            fixed CASH_CONSOLIDATED_T_DAYS, both independent
+                            of the Cash VaR Horizon dropdown)
                             no netting, no cross-currency diversification
     consolidated_var      = V2.4 portfolio VaR using exact actual-T per position
                             with full cross-currency covariance (min(Ti,Tj))
@@ -230,17 +251,21 @@ def prepare_dashboard_data(var_result: dict) -> dict:
     gross_exposures       = var_result.get('gross_attribution', {}).get('exposures', [])
     forwards_standalone   = sum(float(e.get('var', 0.0)) for e in gross_exposures)
 
-    # Cash standalone sum (Option A): simple-sum of cash position VaRs at
-    # cash_horizon T from Section 1. Uses 'total_var' (not 'total_var_cov')
-    # to stay consistent with the no-diversification methodology of the gross
-    # baseline — both forwards and cash are summed assuming perfect correlation.
-    # This makes gross_standalone_sum scope-consistent with consolidated_var.
-    cash_standalone       = float(
-        var_result.get('spot_risk', {}).get('total_var', 0.0)
-    )
+    # Cash standalone sum: simple-sum of cash position VaRs at the fixed
+    # CASH_CONSOLIDATED_T_DAYS horizon (10 trading days) — NOT cash_horizon.
+    # Sourced from gross_cash_attribution (computed in exposure_engine.py at
+    # the fixed T) rather than spot_risk (Section 1's own output, computed at
+    # the user-adjustable Cash VaR Horizon dropdown). This keeps Gross
+    # Standalone Risk — and therefore Risk Reduction — fully independent of
+    # that dropdown, which is documented to affect only the Cash Book Risk
+    # card. See the module docstring's "WHY CASH HERE USES A FIXED T" section
+    # for the full rationale.
+    gross_cash_exposures = var_result.get('gross_cash_attribution', {}).get('exposures', [])
+    cash_standalone       = sum(float(e.get('var', 0.0)) for e in gross_cash_exposures)
 
-    # Combined gross baseline: forwards (bucket-midpoint T) + cash (cash_horizon T)
-    # No netting anywhere, no diversification benefit applied.
+    # Combined gross baseline: forwards (bucket-midpoint T) + cash (fixed
+    # CASH_CONSOLIDATED_T_DAYS). No netting anywhere, no diversification
+    # benefit applied. Both components are independent of cash_horizon.
     gross_standalone_sum  = forwards_standalone + cash_standalone
 
     # Total risk reduction: combined benefit of natural hedging AND cross-currency
@@ -282,15 +307,16 @@ def prepare_dashboard_data(var_result: dict) -> dict:
             'total_risk_reduction_pct': total_risk_reduction_pct,
             'spot_book_var':            round(spot_book_var,            2),
             # Methodology note surfaced in the UI tooltip on the Risk Reduction card.
-            # Explains the two known approximations in this metric.
+            # Explains the one remaining known approximation in this metric.
             'methodology_note': (
                 "Risk Reduction = gross standalone (all positions, no netting, no correlation) "
                 "minus consolidated Portfolio VaR (full netting + correlation). "
                 "Gross baseline: forwards use bucket-midpoint T (slight overstatement); "
-                "cash uses cash_horizon T. Consolidated VaR uses each position's actual "
-                "settlement T. This T mismatch makes the reduction marginally approximate — "
-                "the gross baseline is very slightly overstated. "
-                "The reduction combines natural hedging (within-currency netting) and "
+                "cash uses a fixed 10-trading-day horizon, identical to what Consolidated VaR "
+                "uses for cash — so cash contributes no mismatch here. Forwards in Consolidated "
+                "VaR use each position's actual settlement T, which is what creates the one "
+                "remaining approximation: the gross baseline is very slightly overstated for "
+                "forwards. The reduction combines natural hedging (within-currency netting) and "
                 "diversification benefit (ρ < 1 across currencies). "
                 "See per-currency rows in the hedge table for the isolated natural-hedge component."
             ),

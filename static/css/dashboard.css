@@ -664,11 +664,50 @@ input[type="range"]::-moz-range-thumb {
    been rebuilt with CSS Grid (not <table>) specifically so they can never
    be affected by table-wide rules defined here again — but scoping this
    block too means any FUTURE <table> added anywhere else in the app won't
-   silently inherit hedge-table-specific styling either. */
+   silently inherit hedge-table-specific styling either.
+
+   MOBILE FIX — same horizontal-scroll pattern used for the Cash Positions /
+   Future Exposures input grids in calculator.html: this table has 7 columns
+   (Currency, Bucket, Net Exposure, Net CFaR, Gross CFaR, Hedge Benefit,
+   Effectiveness — the last one also containing an 80px progress bar), which
+   needs more width than a phone screen has. Previously `.hedge-section` had
+   no overflow handling at all, so the table simply spilled past the grey
+   card's edges on narrow screens instead of being contained.
+   min-width below stops the table being squeezed smaller than it can
+   usefully render (which would make the numbers and progress bars cramped
+   and hard to read); .hedge-table-wrapper (added in calculator.html around
+   this <table>, see its CSS further down) is what actually turns that
+   overflow into a swipeable scroll area instead of a spill. On any screen
+   wide enough to fit 760px comfortably (laptop, tablet) this is a no-op —
+   width:100% still lets the table use the full available width exactly as
+   before. */
 .hedge-section table {
   width:           100%;
+  min-width:       760px;
   border-collapse: collapse;
 }
+
+/* Wrapper specifically around the <table> (not the whole .hedge-section
+   card, which also holds the heading and description text that should
+   never need to scroll). Same scrollable-strip technique as .table-wrapper
+   in calculator.html — kept here rather than there since this table is
+   part of the dashboard, which owns dashboard.css. */
+.hedge-table-wrapper {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+.hedge-table-wrapper::-webkit-scrollbar       { height: 4px; }
+.hedge-table-wrapper::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+.hedge-table-wrapper::-webkit-scrollbar-track { background: transparent; }
+.hedge-table-wrapper { scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+
+/* Prevent cell text/numbers from wrapping onto a second line before the
+   min-width floor above is reached — keeps every column's content on one
+   line so the table either displays cleanly or scrolls, with no in-between
+   "half-wrapped" state. */
+.hedge-section th,
+.hedge-section td { white-space: nowrap; }
 
 .hedge-section thead th {
   font-family:    var(--mono);
@@ -832,4 +871,39 @@ input[type="range"]::-moz-range-thumb {
   z-index:        10;
   white-space:    normal;
   pointer-events: none;
+}
+
+/* POSITIONING FIX — .dash-tooltip-icon above was designed only for the
+   "corner of a padded card" use case (the Risk Reduction stat card, which
+   provides position:relative via .stat-card). This one other place reuses
+   the same class for an icon sitting inline next to a line of text instead
+   — the chart legend (.legend-item). .legend-item never set
+   position:relative, so the icon's position:absolute had no positioned
+   ancestor anywhere up the tree to <body>, and silently fell back to
+   positioning itself relative to the page itself — confirmed by
+   inspecting the live DOM, where the icon's offsetParent came back as
+   <body> rather than its intended local container. In practice this
+   meant the icon (and its hover popup) rendered pinned 14px from the
+   top-right corner of the ENTIRE PAGE, nowhere near the chart it's meant
+   to annotate, regardless of scroll position.
+
+   (calculator.html used to have a second icon with this same bug, on the
+   chart heading itself — it was removed and its unique content merged
+   into this one's tooltip text, so there's only one Component CFaR
+   explainer to keep in sync and position correctly.)
+
+   Fix: put the icon back into normal inline flow — position:relative
+   (keeps it exactly where it sits in the HTML, next to its neighbouring
+   text, while still being the correct anchor for its own :hover::after
+   popup below) and inline-flex instead of the base rule's flex (flex
+   alone is block-level and would force a line break before the icon;
+   inline-flex keeps it sitting on the same line as the surrounding text).
+   top/right are reset to 0/auto since those offsets were only ever
+   meaningful for the absolute-positioned card-corner case. */
+.legend-item .dash-tooltip-icon {
+  position:       relative;
+  top:            0;
+  right:          auto;
+  display:        inline-flex;
+  vertical-align: middle;
 }

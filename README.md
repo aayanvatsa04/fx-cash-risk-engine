@@ -77,11 +77,13 @@ All four sections are driven by a single API response from one Calculate click.
   covariance matrix. Natural hedging between same-currency positions falls out
   automatically through signed exposures (no explicit netting step needed).
 
-- **Gross Standalone Risk (Option A):** Gross baseline includes both forward
-  standalone VaRs (Section 3, bucket-midpoint T, no netting/correlation) AND
-  cash standalone VaRs (at cash_horizon T, no diversification). This makes the
-  scope of the gross baseline consistent with consolidated_var, producing a
-  clean apples-to-apples risk reduction percentage.
+- **Gross Standalone Risk:** Gross baseline includes both forward standalone
+  VaRs (Section 3, bucket-midpoint T, no netting/correlation) AND cash
+  standalone VaRs (at a fixed 10-trading-day horizon, no diversification).
+  This makes the scope of the gross baseline consistent with
+  consolidated_var, producing a clean apples-to-apples risk reduction
+  percentage. The fixed cash horizon here is deliberately independent of
+  the Cash VaR Horizon dropdown, which affects only the Cash Book Risk card.
 
 - **Direction-Aware Formula:** Payables use short formula
   VaR = E × (Z × σ_T + μ_T); receivables and cash use long formula
@@ -402,7 +404,9 @@ VaR calculation.
 
 Gross Standalone Risk includes both:
 - **Forward standalone VaRs** (Section 3 internal, no netting, bucket-midpoint T)
-- **Cash standalone VaRs** (simple sum at cash_horizon T, no diversification)
+- **Cash standalone VaRs** (simple sum at a fixed 10-trading-day horizon —
+  CASH_CONSOLIDATED_T_DAYS, independent of the Cash VaR Horizon dropdown —
+  no diversification)
 
 This makes the scope of the gross baseline consistent with the Consolidated
 Portfolio VaR (which includes cash + forwards), so the Risk Reduction percentage
@@ -472,6 +476,7 @@ appears in the consolidated portfolio VaR via ρ=1 and opposite-signed exposures
 | Floating-point noise producing "SGD -0" in hedge benefit column | ✅ Fixed | max(benefit, 0.0) applied before rounding in dashboard_engine.py |
 | Cash Positions / Future Exposures table headers misaligned with their columns | ✅ Fixed | Rebuilt as CSS Grid (see Frontend Architecture Note below); unscoped table CSS in dashboard.css now scoped to .hedge-section |
 | Risk Reduction info tooltip popup clipped/cut off | ✅ Fixed | Removed overflow:hidden from .stat-card (was clipping the tooltip); accent strip given its own border-radius instead |
+| Cash VaR Horizon dropdown silently affected Consolidated VaR, Risk Dashboard stat cards, and Component CFaR bars (not just Cash Book Risk) | ✅ Fixed | Cash now uses a fixed CASH_CONSOLIDATED_T_DAYS=10 everywhere except Section 1; new calculate_gross_cash_var() decouples Gross Standalone Risk's cash component too |
 
 ---
 
