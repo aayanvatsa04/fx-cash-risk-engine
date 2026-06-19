@@ -504,6 +504,82 @@
   .bd-bar-wrap { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 4px; }
   .bd-bar-fill { height: 100%; background: var(--warn); border-radius: 2px; transition: width 0.6s ease; }
 
+  /* ── DIVERSIFICATION BENEFIT (Cash Book Risk) ──
+     Surfaces the benefit that was previously a single quiet sentence
+     (#rPortfolioNote, removed) as a prominent strip + a two-bar visual
+     comparison, so a reader can see "raw sum → reduction → final number"
+     at a glance instead of having to read the footnote.
+
+     Colour choice: teal (--teal), the SAME token already used for
+     "diversification" / "risk reduction" everywhere else in the app (the
+     Risk Dashboard's Risk Reduction stat card, per-bucket
+     diversification_benefit fields). Deliberately NOT purple (--hedge),
+     which .hedge-strip below uses for *natural* hedging (within-currency
+     netting) — diversification (cross-currency, imperfect correlation) is
+     a related but distinct effect, so giving it a different accent colour
+     avoids implying the two mechanisms are the same thing. */
+  .diversification-strip {
+    margin-top: 14px;
+    padding: 10px 14px;
+    background: rgba(45,212,191,0.08);
+    border: 1px solid rgba(45,212,191,0.2);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;   /* wrap onto a second line on narrow cards rather than overflow */
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--teal);
+  }
+  .diversification-strip .div-pct {
+    background: rgba(45,212,191,0.15);
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-weight: 500;
+  }
+
+  /* Two stacked horizontal bars on a shared scale: gross standalone sum
+     (no diversification, the longer/reference bar) above, actual portfolio
+     VaR after diversification below. Bar widths are set inline via JS as a
+     percentage of the gross sum — net is always <= gross by construction
+     (calculate_portfolio_var_cov's covariance-adjusted total can only be
+     lower than or equal to the simple sum it's adjusting), so the gross bar
+     is always full-width and the net bar's shorter width directly encodes
+     the size of the benefit without the reader needing to read any numbers. */
+  .compare-bars     { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .compare-bar-row   { display: flex; align-items: center; gap: 12px; }
+  .compare-bar-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    min-width: 190px;
+    flex-shrink: 0;
+  }
+  .compare-bar-track {
+    flex: 1;
+    height: 14px;
+    background: var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .compare-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.6s ease;
+  }
+  .compare-bar-fill.gross { background: var(--warn); }
+  .compare-bar-fill.net   { background: var(--accent); }
+  .compare-bar-value {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text);
+    min-width: 110px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
   /* ── FORWARD BUCKETS ── */
   .bucket-card {
     background: var(--surface);
@@ -749,6 +825,26 @@
 
     .var-headline { font-size: 36px; }
 
+    /* Gross-vs-net comparison bars (Cash Book Risk diversification benefit):
+       the label (190px) + value (110px) min-widths alone exceed a phone's
+       usable card width, which would squeeze the track between them down
+       to almost nothing. Switching to column direction stacks label, then
+       the full-width bar track, then the value — align-items defaults to
+       'stretch' in column flex, so the track automatically becomes
+       full-width with no extra rule needed. min-width is reset to 0 on the
+       label/value so they can't impose a forced width in this stacked
+       layout; they're just short text lines now, not grid columns. */
+    .compare-bar-row {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 4px;
+    }
+    .compare-bar-label,
+    .compare-bar-value {
+      min-width: 0;
+      text-align: left;
+    }
+
     /* Cash Positions breakdown rows + Forward Bucket currency rows: same
        grid → vertical stack transformation applies to both. */
     .breakdown-row,
@@ -952,12 +1048,224 @@
   </div>
   <div class="error-box" id="errorBox"></div>
 
+  <!-- ══════════════════════════════════════════════════════════
+       RESULTS SECTIONS — order shown below Calculate, top to bottom:
+         1. Cash Book Risk            (this section, immediately below)
+         2. Consolidated Portfolio VaR
+         3. Bucketed Risk Detail
+         4. Risk Dashboard            (summary view, shown last — see
+                                        its own banner comment further
+                                        down for why it reads last)
+       Reordered so the primary, granular figures appear first and the
+       dashboard's high-level summary appears last, since it recaps
+       numbers already computed above rather than introducing new ones.
+       This is a pure DOM-order change — no JS, CSS, or Python logic
+       depends on these sections’ position in the document (each is
+       shown/hidden independently via getElementById), so reordering
+       them here does not affect how any of them render or calculate.
+       ══════════════════════════════════════════════════════════ -->
+  <!-- ── CASH BOOK RISK ── -->
+  <div id="results-s1" style="display:none">
+    <div class="section-title" style="margin-top:32px" id="spotSection">
+      Cash Book Risk
+    </div>
+    <div class="var-card" id="spotCard" style="display:none">
+      <div class="var-card-label">
+        <span id="rCashHorizon"></span>-Day FX Value at Risk · Cash Positions ·
+        <span id="rConfidence"></span> Confidence
+      </div>
+      <div class="var-headline">
+        <span class="ccy" id="rBaseCcy"></span><span id="rSpotVaR"></span>
+      </div>
+      <p class="var-subtext" id="rSpotInterp"></p>
 
+      <!-- Plain-language explainer — expands on rSpotInterp's one-line
+           summary above. Uses the complement-probability framing ("X%
+           chance this is EXCEEDED") rather than the "(100-X)% chance of
+           NOT losing more than this" framing: the complement framing is
+           both the more standard way VaR is stated by risk practitioners,
+           and avoids the known issue where leading with a big confident-
+           sounding "95%" reads as falsely reassuring and obscures how bad
+           the remaining tail could be. Confidence is read live from the
+           actual result (confidence var below — driven by the Confidence
+           dropdown), so this is correct at 90%/95%/99% alike, never
+           hardcoded to one level. Reuses .no-total-notice's existing blue
+           info-box styling (see Bucketed Risk Detail) rather than
+           introducing a new visual style for "explanatory note". -->
+      <div class="no-total-notice" id="rSpotExplainer" style="margin-top:12px"></div>
+
+      <div class="risk-badge" id="rBadge">
+        <div class="risk-dot"></div>
+        <span id="rBadgeText"></span>
+      </div>
+      <div class="warn-box" id="rWarnBox"></div>
+
+      <!-- Diversification benefit — replaces the old quiet #rPortfolioNote
+           footnote (a single muted sentence) with a prominent teal strip
+           stating the saving up front, plus a two-bar visual comparing the
+           gross standalone sum against the actual portfolio VaR on a shared
+           scale. Hidden under the same condition #rPortfolioNote used to
+           check (hasCov && more than one currency) — see renderResults()
+           in the script below for both the visibility logic and the
+           numbers populated into rDiversStrip / rCompareBars. -->
+      <div id="rDiversBlock" style="display:none">
+        <div class="diversification-strip" id="rDiversStrip"></div>
+        <div class="compare-bars" id="rCompareBars"></div>
+      </div>
+    </div>
+    <div class="breakdown-grid" id="spotBreakdown"></div>
+  </div>
+
+
+  <!-- ── CONSOLIDATED PORTFOLIO VAR ── -->
+  <div id="results-consolidated" style="display:none;margin-top:24px">
+    <div class="section-title" style="margin-top:0">Consolidated Portfolio VaR</div>
+    <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.6">
+      Single number across your entire portfolio — cash + all forward exposures.
+      Each individual position (cash + forwards) enters the covariance matrix
+      at its actual settlement horizon using the exact min(T) cross-horizon formula.
+      Natural hedging between same-currency positions falls out automatically.
+    </div>
+    <div class="var-card" id="consolidatedCard">
+      <div class="var-card-label">
+        Consolidated FX VaR · Full Portfolio ·
+        <span id="rConfConsolidated"></span> Confidence
+      </div>
+      <div class="var-headline">
+        <span class="ccy" id="rBaseConsolidated"></span>
+        <span id="rConsolidatedVaR"></span>
+      </div>
+      <p class="var-subtext" id="rConsolidatedInterp"></p>
+      <div id="rConsolidatedBreakdown" style="margin-top:12px"></div>
+    </div>
+
+    <!-- ── PORTFOLIO SCENARIO (V3.2) ──
+         A second, fully independent pair of spot/vol sliders, scoped to
+         this card only — stresses the Consolidated Portfolio VaR figure
+         above, NOT the Risk Dashboard's Period VaR strip further down the
+         page (that card has its own identical-looking but entirely
+         separate slider pair — see dashboard.js's module docstring,
+         "PORTFOLIO SCENARIO SLIDERS"). Reuses the exact same .sim-panel /
+         .bucket-info styling already established for the Risk Dashboard's
+         Scenario Simulation panel, for visual consistency — no new CSS
+         classes were needed for this panel's layout, only new element IDs
+         so the two slider pairs never collide. All rendering and event
+         wiring lives in dashboard.js (renderPortfolioCurrencyDropdown,
+         updatePortfolioSimulation, handlePortfolio*). -->
+    <div class="sim-panel" style="margin-top:16px">
+      <h3>
+        Portfolio Scenario
+        <span class="dash-tooltip-icon tip-inline" data-tip="Stresses the Consolidated Portfolio VaR figure above using the same method as the Risk Dashboard's Period VaR strip further down this page: each currency's Component CFaR is scaled independently from THIS card's own sliders and summed. At 0% on both sliders this exactly equals the Consolidated Portfolio VaR shown above (same min(Tᵢ,Tⱼ) covariance result, same input data — no new computation, just a second independent slider pair reusing it). While sliding, cross-currency correlations are not recomputed, so the result is a conservative approximation — re-run Calculate for an exact figure at a new assumption. This slider pair is fully independent from the Risk Dashboard's sliders below; moving one never affects the other.">ⓘ</span>
+      </h3>
+      <div class="sim-grid">
+
+        <div class="sim-block">
+          <h4>Currency Appreciation / Depreciation</h4>
+          <p class="sim-desc">
+            Shift one currency's spot rate against the full portfolio.
+            Stressed Portfolio VaR scales exactly with spot rate.
+          </p>
+          <div class="currency-picker">
+            <label for="portfolioSpotCcySelect">Currency</label>
+            <select id="portfolioSpotCcySelect"></select>
+          </div>
+          <div class="slider-row">
+            <span class="slider-label">−10%</span>
+            <input type="range" id="portfolioSpotSlider" min="-100" max="100" step="1" value="0">
+            <span class="slider-label">+10%</span>
+          </div>
+          <div style="text-align:center;margin-top:8px">
+            <span class="slider-value" id="portfolioSpotValue">+0.0%</span>
+            <span style="color:var(--muted);font-family:var(--mono);font-size:10px;margin-left:6px">spot shift</span>
+          </div>
+        </div>
+
+        <div class="sim-block">
+          <h4>Volatility Regime Change</h4>
+          <p class="sim-desc">
+            Scale all currency pair volatilities up or down across the full
+            portfolio. Drift (μ) is held constant.
+          </p>
+          <div style="height:38px"></div>
+          <div class="slider-row">
+            <span class="slider-label">−25%</span>
+            <input type="range" id="portfolioVolSlider" min="-250" max="250" step="1" value="0">
+            <span class="slider-label">+25%</span>
+          </div>
+          <div style="text-align:center;margin-top:8px">
+            <span class="slider-value" id="portfolioVolValue">+0.0%</span>
+            <span style="color:var(--muted);font-family:var(--mono);font-size:10px;margin-left:6px">vol shift (all CCY)</span>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="bucket-info" style="margin-top:16px">
+        <div class="bucket-info-cell">
+          <div class="bi-label">Stressed Portfolio VaR</div>
+          <div class="bi-value blue" id="portfolioStressedVaR">—</div>
+        </div>
+      </div>
+
+      <p class="sim-note">
+        <strong style="color:var(--muted)">Approximation:</strong>
+        same method as the Risk Dashboard's Period VaR strip — each currency's
+        Component CFaR is scaled independently (no covariance matrix
+        recomputation in the browser) and summed. Zero-notional currencies
+        (the cross-horizon residual case) use a rougher version of this same
+        approximation — see the Risk Dashboard's Scenario Simulation note
+        below for detail.
+        <strong style="color:var(--muted)">At 0% / 0%:</strong>
+        exactly equals the Consolidated Portfolio VaR figure above.
+        <strong style="color:var(--muted)">Independent:</strong>
+        this slider pair does not affect, and is not affected by, the Risk
+        Dashboard's Scenario Simulation sliders further down the page.
+      </p>
+    </div>
+  </div>
+
+
+
+
+  <!-- ── BUCKETED RISK DETAIL ── -->
+  <!-- Per-bucket technical breakdown: individual positions, net VaRs,      -->
+  <!-- natural hedge benefit, covariance diversification benefit per bucket. -->
+  <!-- Each bucket uses its own time horizon T and cannot be summed.        -->
+  <div id="results-s2" style="display:none">
+
+    <!-- Partial fetch errors (currencies that failed market data lookup) -->
+    <div class="fetch-errors" id="fetchErrors"></div>
+
+    <!-- ── BUCKETED RISK DETAIL ── -->
+    <div class="section-title" style="margin-top:32px" id="fwdSection">
+      Bucketed Risk Detail
+    </div>
+    <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:16px;line-height:1.6">
+      Cash holdings are treated as long positions in Bucket 1, netting against same-currency
+      near-term payables. Forward exposures are bucketed by settlement date. Within each bucket,
+      positions in the same currency are netted (natural hedge benefit), then the remaining net
+      positions across currencies are combined using a covariance matrix (diversification benefit).
+      Each bucket VaR uses its own time horizon T and cannot be summed across buckets.
+    </div>
+    <div id="bucketContainer"></div>
+    <div class="no-total-notice" id="noTotalNotice" style="display:none">
+      ⓘ  Cash positions appear in Bucket 1 as synthetic receivables and net
+      against same-currency near-term obligations. No combined total across
+      buckets — each bucket uses a different time horizon T. Each bucket VaR
+      is meaningful and actionable within its own settlement window.
+    </div>
+
+  </div><!-- /#results-s2 -->
 
   <!-- ══════════════════════════════════════════════════════════
-       RISK DASHBOARD — first results section shown after Calculate.
-       Gives a high-level view (stat cards, chart, simulation, hedge
-       table) before the detailed per-position breakdowns below.
+       RISK DASHBOARD — final results section shown after Calculate.
+       Appears after Cash Book Risk, Consolidated Portfolio VaR, and
+       Bucketed Risk Detail (see the banner comment above results-s1
+       further up this file for the full section order and rationale).
+       This section summarises numbers already computed in those three
+       sections into a high-level view (stat cards, chart, simulation,
+       hedge table) rather than introducing new figures, which is why
+       it now reads last instead of first.
        Hidden until the first successful /calculate response.
        All rendering is handled by dashboard.js which listens for
        the 'varResultReady' custom event fired by the calculate() fn.
@@ -1012,7 +1320,7 @@
       <div class="chart-header">
         <div class="chart-title">
           Net Cashflow Exposure by Currency
-          <span class="sub">Component CFaR printed inside each bar</span>
+          <span class="sub">Bars show net notional · Component CFaR below</span>
         </div>
         <select id="periodSelect" class="bucket-select"></select>
       </div>
@@ -1024,7 +1332,11 @@
         </div>
       </div>
 
-      <!-- Custom legend — no separate CFaR bar (V3: CFaR is printed inside each bar) -->
+      <!-- Custom legend — colour key for the notional chart above only.
+           (V3.2: the Component CFaR explainer that used to live here has
+           moved to its own tooltip on the Component CFaR section's header
+           below, since CFaR is no longer printed inside these bars — see
+           dashboard.js's module docstring, "TWO SEPARATE BAR SYSTEMS".) -->
       <div class="chart-legend">
         <div class="legend-item">
           <div class="legend-dot" style="background:rgba(74,222,128,0.7)"></div>
@@ -1038,14 +1350,50 @@
           <div class="legend-dot" style="background:rgba(107,114,128,0.5)"></div>
           Flat (fully netted in this window)
         </div>
-        <!-- Single tooltip explaining Component CFaR — there used to be a second,
-             overlapping one on the chart heading above (same concept, slightly
-             different wording); the unique points from both have been merged
-             into this one so there's only ever one explanation to keep in sync. -->
-        <div class="legend-item" style="margin-left:auto;color:var(--muted);font-size:10px;cursor:default">
-          Component CFaR printed inside bars
-          <span class="dash-tooltip-icon" style="font-size:11px;margin-left:4px" data-tip="Component CFaR is each currency's marginal contribution to Period VaR, derived from the full covariance matrix — not its standalone exposure. A currency that hedges others in the portfolio can show low Component CFaR even with large net notional, because its risk is partially offset elsewhere in the matrix; this is correct, not a display error. A currency can also show zero net exposure but still carry a non-zero Component CFaR when positions settle at different dates — for example, a receivable at T=43 days and a payable at T=100 days cancel in notional but not in risk, since the payable runs 57 extra days uncovered after the receivable settles (the min(Tᵢ,Tⱼ) covariance formula captures this: cross-term uses min(43,100)=43). Negative components are floored at zero in the chart for clarity but are still included in the Period VaR total, so the total can be slightly lower than the sum of visible bar heights — the bars and total always remain mutually consistent. Zero-notional bars with a non-zero label appear in blue. For unhedged standalone risk per individual position, see the Bucketed Risk Detail section below.">ⓘ</span>
+      </div>
+
+      <!-- ── CHART DETAIL PANEL (V3.3) ──
+           Fixed-position DOM element, NOT a Chart.js floating tooltip — this
+           is a deliberate bug fix, not a styling choice. The previous design
+           used Chart.js's native canvas-anchored tooltip box, which for the
+           LAST bar on the axis gets flipped leftward by Chart.js to stay
+           on-canvas, landing directly on top of the PREVIOUS bar's
+           hover-detection zone. Moving the mouse to read the box then
+           re-triggered hover on that previous bar, collapsing the very box
+           being read — making the last bar's details unreadable. A fixed
+           DOM element has no such failure mode for any bar, on any chart
+           width, since its screen position never overlaps a bar's
+           hover-detection column. See dashboard.js's renderChartForPeriod()
+           (onHover callback) and renderChartDetailPanel() for the full
+           rationale and implementation. Defaults to showing the
+           largest-exposure currency so this is never empty. -->
+      <div class="chart-detail-panel" id="dashChartDetail"></div>
+
+      <!-- ── COMPONENT CFaR BARS (V3.2) ──
+           Stacked directly below the notional chart, inside this same
+           .chart-section card, per the agreed design: the notional chart
+           above answers "where is my money", these bars answer "what can
+           I lose" — on their own independent scale, sorted by risk
+           magnitude. Rendered entirely by dashboard.js's
+           renderCfarBarsForPeriod() into #dashCfarBars; this HTML only
+           provides the static header, tooltip, and empty container.
+
+           V3.4: the header tooltip below used to also spell out the full
+           zero-notional / cross-horizon explanation (the T=43-vs-T=100
+           receivable/payable example). That explanation now lives ONLY in
+           the Chart Detail Panel (#dashChartDetail, rendered by
+           dashboard.js's renderChartDetailPanel()), attached contextually
+           to whichever specific currency actually exhibits the case —
+           rather than as a generic wall of text here that showed
+           regardless of whether anything in the current view needed it.
+           This tooltip keeps the shorter, general explanation of what
+           Component CFaR means. -->
+      <div class="cfar-section">
+        <div class="cfar-header">
+          <span class="cfar-title">Component CFaR by Currency</span>
+          <span class="dash-tooltip-icon tip-inline" data-tip="Component CFaR is each currency's marginal contribution to Period VaR, derived from the full covariance matrix — not its standalone exposure. A currency that hedges others in the portfolio can show a short bar here even with a large notional bar above, because its risk is partially offset elsewhere in the matrix; this is correct, not a display error. Bars here are scaled relative to the largest Component CFaR in the selected period, not to net notional. (Hover an individual bar in the chart above for an explanation of any currency showing zero notional but non-zero CFaR here.) For unhedged standalone risk per individual position, see the Bucketed Risk Detail section above.">ⓘ</span>
         </div>
+        <div class="cfar-bars" id="dashCfarBars"></div>
       </div>
 
       <!-- Period info strip (V3: cumulative period filter) -->
@@ -1128,6 +1476,12 @@
         covariance matrix, so the Period VaR strip becomes an approximation —
         conservative (slightly overstates risk) by an amount proportional to
         cross-currency correlation.
+        <strong style="color:var(--muted)">Zero-notional currencies:</strong>
+        a currency with zero net notional but non-zero Component CFaR (the
+        cross-horizon residual case — see the Chart Detail Panel above) uses a
+        rougher approximation while sliding, scaling its whole CFaR by the vol
+        shift directly rather than the exact vol/drift decomposition used for
+        other currencies. A proper exact fix for this case is planned.
         <strong style="color:var(--muted)">Never updated by sliders:</strong>
         the Portfolio VaR stat card — that is fixed at the exact server-computed
         value for the original inputs. Re-run Calculate to get exact numbers at
@@ -1161,96 +1515,27 @@
     </div>
 
   </div><!-- /#results-dashboard -->
-  <!-- ── CASH BOOK RISK ── -->
-  <div id="results-s1" style="display:none">
-    <div class="section-title" style="margin-top:32px" id="spotSection">
-      Cash Book Risk
-    </div>
-    <div class="var-card" id="spotCard" style="display:none">
-      <div class="var-card-label">
-        <span id="rCashHorizon"></span>-Day FX Value at Risk · Cash Positions ·
-        <span id="rConfidence"></span> Confidence
-      </div>
-      <div class="var-headline">
-        <span class="ccy" id="rBaseCcy"></span><span id="rSpotVaR"></span>
-      </div>
-      <p class="var-subtext" id="rSpotInterp"></p>
-      <div class="risk-badge" id="rBadge">
-        <div class="risk-dot"></div>
-        <span id="rBadgeText"></span>
-      </div>
-      <div class="warn-box" id="rWarnBox"></div>
-      <div id="rPortfolioNote" style="display:none;font-family:var(--mono);font-size:11px;
-           color:var(--muted);margin-top:10px;padding:6px 10px;
-           background:rgba(255,255,255,0.03);border-radius:4px;
-           border:1px solid rgba(255,255,255,0.08);line-height:1.6">
-      </div>
-      <div id="rSpotCov" style="display:none"></div>
-    </div>
-    <div class="breakdown-grid" id="spotBreakdown"></div>
-  </div>
-
-  <!-- ── CONSOLIDATED PORTFOLIO VAR ── -->
-  <div id="results-consolidated" style="display:none;margin-top:24px">
-    <div class="section-title" style="margin-top:0">Consolidated Portfolio VaR</div>
-    <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.6">
-      Single number across your entire portfolio — cash + all forward exposures.
-      Each individual position (cash + forwards) enters the covariance matrix
-      at its actual settlement horizon using the exact min(T) cross-horizon formula.
-      Natural hedging between same-currency positions falls out automatically.
-    </div>
-    <div class="var-card" id="consolidatedCard">
-      <div class="var-card-label">
-        Consolidated FX VaR · Full Portfolio ·
-        <span id="rConfConsolidated"></span> Confidence
-      </div>
-      <div class="var-headline">
-        <span class="ccy" id="rBaseConsolidated"></span>
-        <span id="rConsolidatedVaR"></span>
-      </div>
-      <p class="var-subtext" id="rConsolidatedInterp"></p>
-      <div id="rConsolidatedBreakdown" style="margin-top:12px"></div>
-    </div>
-  </div>
-
-
-
-
-  <!-- ── BUCKETED RISK DETAIL ── -->
-  <!-- Per-bucket technical breakdown: individual positions, net VaRs,      -->
-  <!-- natural hedge benefit, covariance diversification benefit per bucket. -->
-  <!-- Each bucket uses its own time horizon T and cannot be summed.        -->
-  <div id="results-s2" style="display:none">
-
-    <!-- Partial fetch errors (currencies that failed market data lookup) -->
-    <div class="fetch-errors" id="fetchErrors"></div>
-
-    <!-- ── BUCKETED RISK DETAIL ── -->
-    <div class="section-title" style="margin-top:32px" id="fwdSection">
-      Bucketed Risk Detail
-    </div>
-    <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:16px;line-height:1.6">
-      Cash holdings are treated as long positions in Bucket 1, netting against same-currency
-      near-term payables. Forward exposures are bucketed by settlement date. Within each bucket,
-      positions in the same currency are netted (natural hedge benefit), then the remaining net
-      positions across currencies are combined using a covariance matrix (diversification benefit).
-      Each bucket VaR uses its own time horizon T and cannot be summed across buckets.
-    </div>
-    <div id="bucketContainer"></div>
-    <div class="no-total-notice" id="noTotalNotice" style="display:none">
-      ⓘ  Cash positions appear in Bucket 1 as synthetic receivables and net
-      against same-currency near-term obligations. No combined total across
-      buckets — each bucket uses a different time horizon T. Each bucket VaR
-      is meaningful and actionable within its own settlement window.
-    </div>
-
-  </div><!-- /#results-s2 -->
 
   <!-- ── MODEL NOTES & LIMITATIONS ── -->
-  <!-- Always visible on page load — does not depend on a Calculate response. -->
+  <!-- Always visible on page load — does not depend on the Calculate button. -->
   <!-- Placed outside #results-s2 deliberately so users can read the model   -->
   <!-- methodology and limitations before entering any data.                  -->
-  <div class="assumptions" style="margin-top:40px">
+  <!-- Section-title heading added so this card matches the same visual
+       pattern as every other section on the page (Global Settings, Cash
+       Positions, Cash VaR Horizon, Future Exposures, Cash Book Risk,
+       Consolidated Portfolio VaR, Bucketed Risk Detail all use this exact
+       class). Previously this card had no heading at all and dropped
+       straight into its own bold first line, which doubled as both
+       section title and first sentence -- the only section on the page
+       without a clear "new section starts here" cue. margin-top:40px here
+       (matching the gap .assumptions used to set on itself) provides the
+       same spacing from the section above; .section-title's own
+       margin-bottom:16px (defined once, shared by every section-title on
+       the page) now provides the gap to the content below, so no margin-
+       top is needed on .assumptions any more -- same convention every
+       other section-title -> content pair on this page already follows. -->
+  <div class="section-title" style="margin-top:40px">Model Notes &amp; Limitations</div>
+  <div class="assumptions">
     <strong>Model — Parametric (Delta-Normal) VaR with Drift &nbsp;·&nbsp; V3 &nbsp;·&nbsp; Built by Aayan Vatsa, Finmo (June 2026)</strong><br><br>
 
     <strong>VaR Formula:</strong>
@@ -1671,24 +1956,64 @@ function renderResults(data) {
        Represents <strong>${(pct*100).toFixed(2)}%</strong> of
        ${base_ccy}-equivalent cash exposure.`;
 
-    // Portfolio correlation note — explains why headline < sum of individual figures
-    const noteEl = document.getElementById('rPortfolioNote');
-    if (hasCov && spot_risk.positions.length > 1) {
-      const simpleSum = spot_risk.total_var;
-      noteEl.style.display = 'block';
-      noteEl.innerHTML =
-        `Individual figures show each currency's standalone risk in isolation. ` +
-        `Portfolio total accounts for correlations between currencies — ` +
-        `they don't all move against you simultaneously. ` +
-        `Simple sum would be <strong>${base_ccy} ${fmt(simpleSum)}</strong>.`;
-    } else {
-      noteEl.style.display = 'none';
-    }
+    // Plain-language explainer — complement-probability framing agreed on:
+    // leads with the chance of EXCEEDING the threshold (the risk-relevant
+    // fact) rather than the chance of staying under it, which tends to read
+    // as falsely reassuring and says nothing about how bad the tail could
+    // be. compPct is derived from the actual confidence used for this
+    // result, so this stays correct whichever option (90/95/99%) the
+    // Confidence dropdown was set to — never hardcoded to one level.
+    const compPct = Math.round((1 - confidence) * 100);
+    document.getElementById('rSpotExplainer').innerHTML =
+      `ⓘ This <strong>${Math.round(confidence*100)}%</strong> confidence level means there is a ` +
+      `<strong>${compPct}%</strong> chance that your actual loss over the next ` +
+      `<strong>${cash_horizon}</strong> trading day(s) could exceed ` +
+      `<strong>${base_ccy} ${fmt(headlineVar)}</strong>. The model does not cap how large that ` +
+      `loss could be in that scenario: an unusually sharp market move could still produce a ` +
+      `much larger loss than this figure.`;
 
-    // Covariance runs silently — just use the adjusted number as the headline,
-    // no UI explanation needed.
-    const covEl = document.getElementById('rSpotCov');
-    covEl.style.display = 'none';
+    // Diversification benefit — prominent teal strip + gross-vs-net comparison
+    // bars. Replaces the old quiet single-sentence #rPortfolioNote footnote
+    // with a visual that makes the "raw sum → reduction → final number" story
+    // obvious without requiring the reader to parse numbers out of prose.
+    // Same visibility condition as the old note: only meaningful with 2+
+    // currencies AND a non-trivial (>0.01) benefit — a single currency has
+    // nothing to diversify against, so there is nothing to show.
+    const diversBlock = document.getElementById('rDiversBlock');
+    if (hasCov && spot_risk.positions.length > 1) {
+      const simpleSum = spot_risk.total_var;          // gross: assumes perfect correlation
+      const pctBen     = simpleSum > 0 ? (ben / simpleSum * 100) : 0;
+      // netPct: portfolio VaR's bar width as a % of the gross bar (always
+      // <= 100, since the covariance-adjusted total can only be lower than
+      // or equal to the simple sum it's adjusting — net VaR <= gross VaR
+      // by construction in calculate_portfolio_var_cov).
+      const netPct     = simpleSum > 0 ? (headlineVar / simpleSum * 100) : 0;
+
+      diversBlock.style.display = 'block';
+
+      document.getElementById('rDiversStrip').innerHTML =
+        `⬡ Diversification benefit: <strong>${base_ccy} ${fmt(ben)}</strong> saved ` +
+        `<span class="div-pct">${pctBen.toFixed(1)}%</span> — your currencies don't all move ` +
+        `against you at once.`;
+
+      document.getElementById('rCompareBars').innerHTML = `
+        <div class="compare-bar-row">
+          <div class="compare-bar-label">Gross Standalone Sum</div>
+          <div class="compare-bar-track">
+            <div class="compare-bar-fill gross" style="width:100%"></div>
+          </div>
+          <div class="compare-bar-value">${base_ccy} ${fmt(simpleSum)}</div>
+        </div>
+        <div class="compare-bar-row">
+          <div class="compare-bar-label">Portfolio VaR (diversified)</div>
+          <div class="compare-bar-track">
+            <div class="compare-bar-fill net" style="width:${netPct.toFixed(1)}%"></div>
+          </div>
+          <div class="compare-bar-value">${base_ccy} ${fmt(headlineVar)}</div>
+        </div>`;
+    } else {
+      diversBlock.style.display = 'none';
+    }
 
     // Risk badge
     const sqrtT  = Math.sqrt(cash_horizon);
@@ -2005,9 +2330,12 @@ function fmtC(n) {
 
 <!-- Chart.js (required by dashboard.js) -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-<!-- chartjs-plugin-datalabels: renders Component CFaR values as text labels inside bars.
-     Must be loaded AFTER Chart.js and BEFORE dashboard.js so that ChartDataLabels
-     is defined when dashboard.js registers it with Chart.register(ChartDataLabels). -->
+<!-- chartjs-plugin-datalabels: renders net notional values as text labels inside
+     the notional chart's bars (V3.2 — previously rendered Component CFaR; see
+     dashboard.js's module docstring, "TWO SEPARATE BAR SYSTEMS", for why this
+     changed). Must be loaded AFTER Chart.js and BEFORE dashboard.js so that
+     ChartDataLabels is defined when dashboard.js registers it with
+     Chart.register(ChartDataLabels). -->
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <!-- Dashboard rendering: chart, sliders, hedge table -->
 <script src="/static/js/dashboard.js"></script>

@@ -20,17 +20,22 @@ benefit computation, and cross-currency covariance adjustment.
 Everything lives on a single unified page. The user enters their portfolio,
 clicks Calculate once, and sees:
 
-1. **Risk Dashboard** — headline stat cards, bar chart with Component CFaR
-   labels, cumulative period filter, scenario simulation sliders, and hedge
-   effectiveness table. Appears first so executives and managers get the
-   summary view immediately.
-2. **Cash Book Risk** — standalone VaR on current cash holdings at user-
+1. **Cash Book Risk** — standalone VaR on current cash holdings at user-
    specified T, with per-currency breakdown and covariance-adjusted total.
-3. **Consolidated Portfolio VaR** — single portfolio number using the exact
-   min(Ti,Tj) cross-horizon covariance formula across all positions.
-4. **Bucketed Risk Detail** — full per-bucket technical breakdown: individual
+   Appears first, directly below its own Cash VaR Horizon dropdown, so the
+   one input that affects this card sits right next to the card it affects.
+2. **Consolidated Portfolio VaR** — single portfolio number using the exact
+   min(Ti,Tj) cross-horizon covariance formula across all positions, with
+   its own independent Portfolio Scenario sliders for a live "what-if"
+   stressed figure on the same card.
+3. **Bucketed Risk Detail** — full per-bucket technical breakdown: individual
    positions, net VaRs, natural hedge benefit, and diversification benefit
-   per bucket. Analyst-level detail at the bottom of the page.
+   per bucket. Analyst-level detail.
+4. **Risk Dashboard** — headline stat cards, a net notional bar chart paired
+   with a separate Component CFaR bar section below it, cumulative period
+   filter, its own independent scenario simulation sliders, and hedge
+   effectiveness table. Appears last, since it summarises numbers already
+   computed in the three sections above rather than introducing new ones.
 
 All four sections are driven by a single API response from one Calculate click.
 
@@ -42,14 +47,22 @@ All four sections are driven by a single API response from one Calculate click.
 ① Global Settings + inputs (cash positions, horizon, future exposures)
 ② Calculate VaR button
    ── results appear below ──
-③ RISK DASHBOARD
+③ Cash Book Risk (standalone cash VaR at user-specified T)
+④ Consolidated Portfolio VaR (full portfolio, exact individual-T covariance)
+   └── Portfolio Scenario sliders (±10% spot, ±25% vol) → Stressed Portfolio VaR
+⑤ Bucketed Risk Detail (per-bucket netting, attribution, diversification)
+⑥ RISK DASHBOARD (summary view, shown last)
    ├── Stat cards: Portfolio VaR · Spot Book VaR · Gross Standalone · Risk Reduction
-   ├── Net Cashflow Exposure bar chart (Component CFaR printed inside bars)
-   ├── Scenario Simulation sliders (±10% spot, ±25% vol)
+   ├── Net Cashflow Exposure bar chart (net notional, labelled with its own value)
+   ├── Component CFaR bars (separate horizontal bars, sorted by risk magnitude)
+   ├── Scenario Simulation sliders (±10% spot, ±25% vol) — independent of ④'s sliders
    └── Natural Hedge Effectiveness table (per currency per bucket)
-④ Cash Book Risk (standalone cash VaR at user-specified T)
-⑤ Consolidated Portfolio VaR (full portfolio, exact individual-T covariance)
-⑥ Bucketed Risk Detail (per-bucket netting, attribution, diversification)
+⑦ Model Notes & Limitations — always visible, independent of the Calculate
+   button (renders on page load, before any input is entered; sections
+   ③–⑥ above are hidden until the first successful Calculate response)
+   (formula, confidence-level meaning, output-section definitions,
+    Component CFaR, Gross Standalone Risk scope, market data sourcing,
+    Known Limitations table)
 ```
 
 ---
@@ -59,6 +72,13 @@ All four sections are driven by a single API response from one Calculate click.
 - **Cash Book Risk:** Standalone parametric VaR on cash holdings at user-
   specified T. Per-currency breakdown. Portfolio total is covariance-adjusted
   (currencies are not perfectly correlated — diversification benefit shown).
+  A plain-language explainer states the confidence level via its complement
+  probability (e.g. "5% chance this is exceeded" at 95% confidence) and notes
+  the model doesn't cap the tail. When 2+ currencies are held, a teal strip
+  states the diversification saving up front, backed by a two-bar visual
+  comparing the gross standalone sum against the diversified portfolio VaR
+  on a shared scale — see "Cash Book Risk — Diversification Benefit Display"
+  below for the full design rationale.
 
 - **Bucketed Risk Detail:** Cash holdings routed into Bucket 1 as synthetic
   long positions, netting against same-currency near-term payables.
@@ -99,12 +119,34 @@ All four sections are driven by a single API response from one Calculate click.
   actual T. Period VaR is decomposed into per-currency Component CFaRs via the
   Euler decomposition theorem — their sum equals the period VaR exactly.
 
-- **Component CFaR Labels (V3):** Component CFaR values are printed directly
-  inside each net exposure bar (or above for short/zero bars) via
-  chartjs-plugin-datalabels. Labels are visible immediately on render without
-  requiring hover. Component CFaR encodes each currency's marginal contribution
-  to total portfolio risk, including all cross-currency correlations — it is not
-  a standalone single-currency VaR.
+- **Two Separate Bar Systems (V3.2):** The Risk Dashboard's Net Cashflow
+  Exposure chart shows net notional bars only, each labelled with its own
+  value (not Component CFaR) so the printed number always matches what the
+  bar's height visually shows. Component CFaR has its own dedicated
+  horizontal bar section directly below, scaled to its own range and sorted
+  by risk magnitude — this replaced the V3 design where CFaR was printed
+  inside the notional bars, which user testing found confusing (a currency
+  could show near-zero notional but the chart's single largest CFaR label).
+  Both bar systems share the same simulation sliders below them.
+
+- **Fixed Chart Detail Panel (V3.3):** Hovering a notional bar shows its
+  Component CFaR, spot rate, vol, and horizon in a fixed-position DOM panel
+  below the chart's legend — not a Chart.js floating tooltip. This replaced
+  a real bug: a canvas-anchored tooltip box for the LAST bar gets flipped
+  leftward by Chart.js to stay on-canvas, landing on top of the PREVIOUS
+  bar's hover zone, so reading it by moving the mouse left immediately
+  collapsed it. The fixed panel has no such failure mode for any bar, at
+  any width. Defaults to the largest-exposure currency so it's never empty.
+
+- **Portfolio Scenario Sliders (V3.2):** The Consolidated Portfolio VaR card
+  has its own independent ±10% spot / ±25% vol slider pair, driving a live
+  "Stressed Portfolio VaR" figure on that same card. This is a separate
+  slider pair from the Risk Dashboard's Scenario Simulation sliders further
+  down the page — moving one never affects the other. At 0%/0% the Stressed
+  Portfolio VaR figure exactly equals the Consolidated Portfolio VaR above
+  it, since both are computed from the same underlying covariance result
+  (`cumulative_vars['all']` is mathematically guaranteed to equal
+  `consolidated_var` — see the Cumulative Period Filter feature below).
 
 - **Comma-Formatted Amount Inputs:** Cash balance and exposure amount fields
   display thousand-separator commas live as the user types (e.g. "2,000,000"),
@@ -336,9 +378,9 @@ By the Euler homogeneity theorem:
 Σᵢ ComponentVaR_i = Portfolio VaR    (exactly)
 ```
 
-This is why the bars in the chart sum to the Period VaR strip — not because the
-components are independent, but because they are constructed as a partition of
-the covariance result.
+This is why the Component CFaR bars sum to the Period VaR strip — not because
+the components are independent, but because they are constructed as a
+partition of the covariance result.
 
 **Why Component CFaR differs from standalone VaR:**
 
@@ -354,8 +396,21 @@ Bucketed Risk Detail section.
 A currency can have zero net notional within a period but still carry a non-zero
 Component CFaR. This happens when positions in the same currency settle at
 different dates — the min(Tᵢ,Tⱼ) formula does not fully cancel them because
-one position outlives the other. Zero-notional bars appear in grey with CFaR
-labels floating in blue above the baseline.
+one position outlives the other. As of V3.2 this shows naturally and clearly:
+the currency's bar in the notional chart correctly shows zero (nothing to
+report there), while its bar in the separate Component CFaR section below
+shows the real, non-zero risk — no special-casing or floating labels needed,
+since the two bar systems are on independent scales by design.
+
+As of V3.4, the full walkthrough explanation of WHY this happens (the
+T=43-vs-T=100 receivable/payable example) lives in exactly one place: a
+hover tooltip on the note shown inside the Chart Detail Panel, attached
+contextually to whichever specific currency is actually exhibiting the case
+(`renderChartDetailPanel()` in `dashboard.js`). The Component CFaR section's
+own header tooltip keeps only a short, general explanation of what Component
+CFaR means and points to the chart for this specific case, rather than
+repeating the full walkthrough as a generic disclaimer shown regardless of
+whether anything in the current view needs it.
 
 **Time bucketing for future exposures:**
 
@@ -389,6 +444,55 @@ VaR calculation.
 
 ---
 
+## Cash Book Risk — Diversification Benefit Display
+
+The Cash Book Risk card surfaces two pieces of information that previously
+lived only in a single quiet sentence, both purely in `calculator.html` —
+no engine, math, or API changes were needed for either, since `total_var`,
+`total_var_cov`, and `diversification_benefit` were already computed and
+returned by `var_engine.py` / `exposure_engine.py`.
+
+**Plain-language explainer.** A second sentence beneath the existing bold
+one-liner restates the VaR figure using the complement-probability framing —
+e.g. at 95% confidence: "there is a 5% chance that your actual loss... could
+exceed [VaR]" — rather than "95% chance of NOT losing more than [VaR]".
+This was a deliberate choice over the equally-valid 95%-framing, for two
+reasons: it is closer to how VaR is formally defined (the threshold such
+that the probability of exceeding it is at most the complement), and it
+avoids a known communication problem where a large confident-sounding
+percentage reads as reassurance and says nothing about how bad the
+remaining tail could be. The explainer always reads the actual `confidence`
+value from the result (`compPct = Math.round((1 - confidence) * 100)`), so
+it is correct at any Confidence dropdown setting (90/95/99%) and is never
+hardcoded to one level. An earlier draft of this sentence also referenced
+"1 trading day in 20" as an intuition aid for the 5% case — this was
+deliberately dropped, not just for clarity but for correctness: VaR makes a
+single one-shot probability statement about the cumulative loss over the
+whole horizon, and a day-counting frequency analogy nudges the reader
+toward a different (and wrong) per-day repeated-trial mental model.
+
+**Diversification benefit strip + comparison bars.** When 2+ cash currencies
+are held and the covariance-adjusted total differs meaningfully from the
+simple sum (same condition the old single-sentence note used:
+`diversification_benefit > 0.01` and more than one position), a teal strip
+states the benefit and percentage saved up front, followed by two stacked
+bars on a shared scale: "Gross Standalone Sum" (always the full-width
+reference bar, since it is the larger of the two by construction) and
+"Portfolio VaR (diversified)" (drawn at `headlineVar / simpleSum × 100`
+percent of that width). The bar-width comparison makes the size of the
+benefit visually obvious without requiring the reader to parse any numbers.
+Colour choice is deliberate: teal (`--teal`) is the same token already used
+for "diversification" / "risk reduction" everywhere else in the app (the
+Risk Dashboard's Risk Reduction stat card, per-bucket
+`diversification_benefit` fields) — kept distinct from the purple
+(`--hedge`) used by `.hedge-strip` elsewhere, since that colour is reserved
+for *natural* hedging (within-currency netting), a related but different
+effect from cross-currency diversification. With a single currency held,
+there is nothing to diversify against, so the whole block stays hidden,
+consistent with the old note's behaviour.
+
+---
+
 ## Dashboard — Design Decisions
 
 ### CFaR vs VaR labelling
@@ -397,7 +501,7 @@ VaR calculation.
 |---|---|---|
 | VaR | Market value of cash holding | Cash Book Risk section |
 | CFaR | Notional of future cash flow | Bucketed Risk Detail |
-| Component CFaR | Marginal covariance contribution per currency | Dashboard bar chart |
+| Component CFaR | Marginal covariance contribution per currency | Dashboard Component CFaR bars |
 | Portfolio VaR | All positions combined | Consolidated + period strip |
 
 ### Gross Standalone Risk — Scope
@@ -441,7 +545,20 @@ Their sum equals Period VaR exactly (Euler decomposition theorem).
 
 **At Δ ≠ 0:** Each component is scaled independently without rerunning the
 covariance matrix. The Period VaR strip (sum of components) is a conservative
-approximation. The Portfolio VaR stat card is never updated by sliders.
+approximation.
+
+**Two independent slider pairs (V3.2):** The Risk Dashboard's stat cards
+(including its own "Portfolio VaR (exact)" card) are never updated by either
+slider pair — those stay fixed at the exact server-computed values for the
+original inputs, full stop. The ONE deliberate exception is the Consolidated
+Portfolio VaR card's own "Stressed Portfolio VaR" figure, which has its own
+independent Portfolio Scenario slider pair (separate JS state, separate DOM
+elements, fully decoupled from the Risk Dashboard's sliders below) and
+recomputes live using the identical method described above — summing
+simulated Component CFaRs from the `'all'` cumulative period, which
+`exposure_engine.py` guarantees equals `consolidated_var` exactly at Δ=0.
+Re-run Calculate to get an exact server-computed figure at a genuinely new
+vol/spot assumption, for either slider pair.
 
 ### Hedge effectiveness
 
@@ -474,6 +591,7 @@ developer has to read carefully to tell apart.
 | No public holiday calendar — counts Mon–Fri only | ⚠️ Open | Market-specific calendar (SGX, NYSE, MAS) |
 | Vol slider approximates during simulation (no covariance recomputation in browser) | ⚠️ By design (PoC) | Add /simulate endpoint or pass correlation matrix to frontend |
 | Gross standalone uses bucket-midpoint T for forwards (slight overstatement) | ⚠️ Known, disclosed | Recompute at actual T for clean apples-to-apples |
+| Vol slider's flat-currency case (zero net notional, non-zero Component CFaR — the cross-horizon residual) uses a rougher interim approximation: the whole static CFaR is scaled by (1+Δvol) directly, rather than the exact vol/drift decomposition used for long/short currencies. (V3.5 — this replaced a worse bug where ANY non-zero vol delta snapped these currencies' CFaR straight to 0, since vol_term/mu_term are both precomputed as `net_notional_base × (something)` and are therefore always 0 for a flat currency, regardless of how large its real Component CFaR is.) | ⚠️ Known, disclosed (interim fix in place) | Exact fix is available, not just a better approximation: under a uniform vol-regime shift, the volatility-driven part of Component VaR scales EXACTLY linearly for any position (a provable consequence of the covariance matrix being homogeneous of degree 2 in σ) — requires `exposure_engine.py`'s `_compute_component_vars_by_currency` to expose the vol-part/drift-part decomposition per currency, computed from real per-position sums rather than `net_notional_base` |
 
 ---
 
@@ -506,6 +624,13 @@ question of where a new row goes.
 | Cash Positions / Future Exposures table headers rebuilt as CSS Grid | Native `<table>` column widths could drift from body row widths depending on browser/zoom; unscoped table CSS in dashboard.css is now scoped to `.hedge-section` so it can't leak onto these grids either |
 | Risk Reduction info tooltip popup fixed | Was clipped/cut off by `overflow:hidden` on `.stat-card`; the accent strip was given its own border-radius instead so the card no longer needs to clip overflow |
 | Cash VaR Horizon dropdown decoupled from Consolidated VaR / Risk Dashboard / Component CFaR bars | Previously silently affected all of these, not just the Cash Book Risk card it's documented to affect; cash now uses a fixed `CASH_CONSOLIDATED_T_DAYS = 10` everywhere except Section 1, with a new `calculate_gross_cash_var()` decoupling Gross Standalone Risk's cash component too |
+| Results sections reordered: Cash Book Risk → Consolidated Portfolio VaR → Bucketed Risk Detail → Risk Dashboard | Previously Risk Dashboard rendered first, ahead of the three detailed sections it summarises; reordered so the primary/granular figures come first and the summary view comes last, and so Cash Book Risk now sits directly below the Cash VaR Horizon dropdown that's the only input affecting it. Pure DOM reorder in `calculator.html` — no JS, CSS, or Python logic changed, since each section is shown/hidden independently via `getElementById` rather than by position |
+| Cash Book Risk: diversification benefit raised from a quiet footnote to a teal strip + gross-vs-net comparison bars; VaR explainer expanded with a complement-probability plain-language sentence | Previously the only mention of the diversification saving was a single muted sentence (`#rPortfolioNote`), and the only explanation of the VaR figure was one short bold line; mentor feedback during a demo prompted both additions. Frontend-only — `total_var`, `total_var_cov`, and `diversification_benefit` were already computed by the engine, no Python changes |
+| Risk Dashboard chart redesigned into two separate bar systems (V3.2) — net notional bars (unchanged position, now labelled with their own value) above a new horizontal Component CFaR bar section (`renderCfarBarsForPeriod`, sorted by risk magnitude, on its own scale) | User testing found the previous design unintuitive: bar height encoded net notional while the printed label encoded Component CFaR — two different quantities sharing one visual, so a currency with near-zero notional could carry the single largest CFaR label on the chart. Splitting "where is my money" (notional bars) from "what can I lose" (CFaR bars) resolves this without losing any data — Component CFaR is still shown alongside the notional chart's per-currency details (originally a floating tooltip, later replaced — see the V3.3 row below). Frontend-only (`dashboard.js`, `calculator.html`, `dashboard.css`) — no Python changes, since `dashboard_engine.py`'s existing per-currency `cfar`/`vol_term`/`mu_term`/`net_notional_base` fields already covered both bar systems |
+| Independent "Portfolio Scenario" spot/vol sliders added to the Consolidated Portfolio VaR card, driving a new "Stressed Portfolio VaR" figure | Previously the only simulation sliders lived in the Risk Dashboard, far down the page from the Consolidated VaR card they'd need to scroll up to see reflected in. This second slider pair is fully independent (separate JS state, separate DOM elements) and stresses the Consolidated VaR card's own figure in place. Required no new backend computation: `exposure_engine.py` already guarantees `cumulative_vars['all']['period_var']` equals `consolidated_var['total_var']` exactly, so the existing `'all'` period's per-currency `vol_term`/`mu_term`/`cfar` values (already sent to the frontend) are reused as-is via the same `applySimulation()` function the Risk Dashboard sliders use — pure frontend wiring, no Python changes |
+| Notional chart's floating Chart.js tooltip replaced with a fixed-position DOM panel (V3.3) — `#dashChartDetail`, rendered by the new `renderChartDetailPanel()`, driven by the chart's `onHover` callback instead of `plugins.tooltip` | Real, reproducible bug, caught by screenshot: for the LAST bar on the x-axis, Chart.js flips its floating tooltip box leftward to keep it on-canvas, landing the box's pixels on top of the PREVIOUS bar's hover-detection column (chart uses `interaction: {mode:'index', intersect:false}`, so hover is driven purely by x-proximity). Moving the mouse left to read the box re-triggered hover on that previous bar, collapsing the very box being read — made the last bar's details unreadable, no matter how the mouse moved. A fixed DOM element has no such failure mode for any bar, at any width, since its screen position never overlaps a bar's hover-detection zone. Defaults to showing the largest-exposure currency so it's never empty. Frontend-only (`dashboard.js`, `calculator.html`, `dashboard.css`) — no Python changes |
+| Zero-notional/non-zero-CFaR explanation split into two tooltips (V3.4) — the full T=43-vs-T=100 walkthrough moved from the Component CFaR section's header tooltip into a hoverable "ⓘ" on the Chart Detail Panel's own note, attached contextually to whichever currency actually exhibits the case | The header tooltip previously carried the full walkthrough as a generic disclaimer, shown identically regardless of whether anything in the current view needed it, making it long. The Chart Detail Panel's note (added in V3.3) initially showed this as plain, non-interactive text with no further detail. Moving the full explanation there instead — using the same `.dash-tooltip-icon`/`.tip-inline` CSS-only hover mechanism already used elsewhere (a plain `:hover::after` popup reading `data-tip`, NOT the buggy Chart.js canvas tooltip fixed in V3.3 — no shared mechanism, no risk of reintroducing that bug) — makes the explanation appear exactly when and where it's relevant, and lets the header tooltip stay short and general. Frontend-only (`dashboard.js`, `calculator.html`) — no Python changes |
+| Vol slider no longer snaps a flat currency's Component CFaR to exactly 0 on any non-zero move (V3.5 interim fix) — `applySimulation()`'s flat-direction branch now scales the static exact `cfar` by `(1+Δvol)` instead of hardcoding `cfar = 0` | Caught via screenshot: a −0.1% vol nudge sent MYR's Component CFaR from SGD 55,406 straight to SGD 0. Root cause was two-layered — an explicit `else { cfar = 0 }` branch for flat currencies, AND the deeper fact that `vol_term`/`mu_term` are both precomputed server-side as `net_notional_base × (something)`, which is always 0 for a flat (net-zero-notional) currency regardless of how large its real cross-horizon-residual Component CFaR is. This interim patch is frontend-only (`dashboard.js`, `calculator.html` sim-note copy) and is an approximation, not an exact fix — it's tracked as a remaining item in Known Limitations, with the exact fix (a provable linear-scaling identity under uniform vol shifts) requiring a backend change to expose a proper vol-part/drift-part decomposition per currency, deliberately deferred per the user's request to scope it as a separate, future, branch-worthy change |
 
 ---
 

@@ -1,5 +1,5 @@
 /**
- * dashboard.js — Risk Dashboard Rendering Layer (V3)
+ * dashboard.js — Risk Dashboard Rendering Layer (V3.2)
  *
  * This file handles all chart and dashboard rendering inside the unified
  * calculator page (calculator.html). It is loaded once as a separate script
@@ -18,12 +18,15 @@
  *
  * This file listens for that event and calls renderDashboard(). This keeps
  * the two JS files loosely coupled — neither needs to know the other's
- * internal structure. The calculator JS owns the form and engine output;
- * this file owns the chart, sliders, and hedge table.
+ * internal structure. The calculator JS owns the form and engine output
+ * (including the STATIC content of the Consolidated Portfolio VaR card —
+ * the headline number, interpretation sentence, and position breakdown);
+ * this file owns everything that reacts to a slider: the chart, both
+ * slider pairs, the Component CFaR bars, and the hedge table.
  *
  * === V3 CHANGE: CUMULATIVE PERIOD FILTER (replaces per-bucket dropdown) ===
  *
- * The bar chart dropdown now shows cumulative time windows instead of
+ * The bar chart dropdown shows cumulative time windows instead of
  * individual buckets:
  *   'Next 1 month'   → positions in Bucket 1 only
  *   'Next 3 months'  → positions in Buckets 1+2
@@ -35,22 +38,92 @@
  * The hedge effectiveness table still uses data.buckets (per-bucket view,
  * unchanged from V2).
  *
- * === CHART DESIGN (V3.1 — single dataset + datalabels) ===
+ * === V3.2 CHANGE: TWO SEPARATE BAR SYSTEMS (replaces inside-bar CFaR labels) ===
  *
- * ONE dataset per chart: net notional bars (green=long, red=short, grey=flat).
- * The previous side-by-side blue CFaR bars have been removed. Component CFaR
- * is now printed INSIDE each bar via chartjs-plugin-datalabels (loaded via CDN
- * in calculator.html and registered globally here in DOMContentLoaded).
+ * User testing on the V3.1 design (Component CFaR printed as a text label
+ * inside each notional bar) found it unintuitive: bar HEIGHT encoded net
+ * notional while the printed LABEL encoded Component CFaR — two unrelated
+ * quantities sharing one visual. A currency with near-zero notional could
+ * carry the single largest CFaR label on the whole chart (e.g. an exotic,
+ * volatile currency with a small position), which reads as a contradiction
+ * even though both numbers are individually correct.
  *
- * Bar label logic:
- *   - Tall bars (≥40px): Component CFaR centred inside the bar, white text.
- *   - Short bars (<40px): Component CFaR floated above/below the bar tip.
- *   - Zero-notional bars with non-zero CFaR: label floated above baseline in
- *     blue — these arise when same-currency positions cancel in notional but
- *     not in risk (cross-horizon mismatch). A tooltip on the chart explains why.
+ * V3.2 resolves this by answering the two questions a reader actually has —
+ * "where is my money?" and "what can I lose?" — with two separate,
+ * internally-consistent bar systems instead of one chart trying to encode
+ * both:
  *
- * CFaR labels are stored on chart._cfarValues[] so updateChartSimulation() can
- * update them without recreating the Chart.js instance.
+ *   1. NOTIONAL CHART (top, Chart.js bar chart, unchanged position):
+ *      Bar height = net notional. The printed label inside/above each bar
+ *      is now the net notional value itself (not CFaR), so the label
+ *      always matches what the bar's height visually shows. A currency
+ *      with zero notional in this window simply shows no label — there is
+ *      nothing to report, no special-casing required.
+ *
+ *   2. COMPONENT CFaR BARS (new, plain HTML/CSS, stacked directly below the
+ *      notional chart inside the same .chart-section card — see
+ *      renderCfarBarsForPeriod()): one horizontal bar per currency, bar
+ *      LENGTH = Component CFaR, scaled relative to the largest CFaR in the
+ *      selected period and sorted with the biggest risk first. This is
+ *      where the "currency with small notional but large risk" case now
+ *      lives — clearly, on its own scale, explicitly labelled as risk
+ *      rather than mixed into the notional chart's scale.
+ *
+ * Both bar systems are driven by the SAME Risk Dashboard sliders (spot +
+ * vol) and the SAME applySimulation() function — only the rendering target
+ * differs. Component CFaR is also shown — along with spot rate, vol, and
+ * horizon — in the fixed Chart Detail Panel described below; it is no
+ * longer printed as a label on the bar itself.
+ *
+ * === V3.3 CHANGE: FIXED CHART DETAIL PANEL (replaces floating tooltip) ===
+ *
+ * The notional chart's native Chart.js floating tooltip (which used to
+ * show Component CFaR, spot rate, vol, and horizon on hover) has been
+ * replaced with a fixed-position DOM panel (#dashChartDetail, rendered by
+ * renderChartDetailPanel()) that sits below the chart's legend.
+ *
+ * This is a structural bug fix, not a cosmetic one. The floating tooltip
+ * had a real, reproducible failure: for the LAST bar on the x-axis (no
+ * canvas space to its right), Chart.js flips the tooltip box leftward to
+ * keep it on-canvas — which places the box's pixels directly on top of the
+ * PREVIOUS bar's hover-detection column. Since the chart hit-tests purely
+ * by x-proximity (`interaction: { mode: 'index', intersect: false }`),
+ * moving the mouse left to actually read the box immediately re-triggers
+ * hover on the previous bar, collapsing the box being read. This made the
+ * last bar's tooltip effectively unreadable — confirmed via screenshot
+ * during testing (MYR, the rightmost bar, with its explanatory zero-
+ * notional note).
+ *
+ * A fixed DOM element has no such failure mode: its screen position never
+ * overlaps any bar's hover-detection zone, for ANY bar, on ANY chart
+ * width — there's nothing for the mouse to "accidentally" move onto. See
+ * renderChartForPeriod()'s onHover callback and renderChartDetailPanel()
+ * for the implementation. The panel defaults to showing the largest-
+ * exposure currency (index 0) whenever nothing is actively hovered, so it
+ * is never empty and never causes a layout-shifting show/hide toggle.
+ *
+ * === V3.2 ADDITION: PORTFOLIO SCENARIO SLIDERS (Consolidated VaR card) ===
+ *
+ * A second, fully independent pair of spot/vol sliders now lives inside the
+ * Consolidated Portfolio VaR card (#results-consolidated), stressing that
+ * card's own headline number ("Stressed Portfolio VaR") rather than the
+ * Risk Dashboard's Period VaR strip below. The two slider pairs never
+ * affect each other — moving the Risk Dashboard's sliders has no effect on
+ * the Consolidated VaR card, and vice versa (separate module-level state:
+ * deltaSpot/deltaVol/activeSpotCcy for the Risk Dashboard,
+ * portfolioDeltaSpot/portfolioDeltaVol/portfolioActiveSpotCcy for the
+ * Consolidated VaR card). Each pair sits physically next to the number it
+ * controls, so neither requires scrolling away to see its own effect.
+ *
+ * This required NO new backend computation. exposure_engine.py guarantees
+ * cumulative_vars['all']['period_var'] equals consolidated_var['total_var']
+ * exactly — both are computed by the identical min(Tᵢ,Tⱼ) covariance method
+ * over the identical full position list (see exposure_engine.py's
+ * CUMULATIVE_PERIOD_DEFINITIONS docstring for the guarantee). This means
+ * the 'all' period's per-currency vol_term/mu_term/cfar values — already
+ * sent to the frontend for the Risk Dashboard's "All" filter option — are
+ * equally valid inputs for stressing the Consolidated VaR figure. See
+ * updatePortfolioSimulation(), which reuses applySimulation() unchanged.
  *
  * === WHAT THIS FILE DOES NOT DO ===
  *
@@ -58,29 +131,51 @@
  * - No fetch calls (the calculator JS fetches; this just consumes the result)
  * - No VaR formulas — simulation uses pre-computed vol_term and mu_term
  *   provided by dashboard_engine.py's _process_cumulative_periods()
+ * - Does not render the STATIC content of the Consolidated VaR card
+ *   (headline number, interpretation sentence, position breakdown) — that
+ *   remains calculator.html's responsibility via renderResults(). This file
+ *   only adds the Portfolio Scenario slider panel and its live "Stressed
+ *   Portfolio VaR" readout inside that same card.
  *
- * === SIMULATION MATHEMATICS (for reference) ===
+ * === SIMULATION MATHEMATICS (for reference — used by BOTH slider pairs) ===
  *
- * Volatility slider (Δ_vol, all currencies):
+ * Volatility slider (Δ_vol, long/short currencies):
  *   new_cfar_long  = Math.max(vol_term * (1 + Δ_vol) - mu_term, 0)
  *   new_cfar_short = Math.max(vol_term * (1 + Δ_vol) + mu_term, 0)
  *   Note: mu_term (drift) does NOT scale with vol — it is independent of the
  *         volatility regime. vol_term uses exposure-weighted effective_T per
  *         currency (an approximation for multi-horizon periods).
  *
+ * Volatility slider (Δ_vol, FLAT currencies — V3.5 interim fix):
+ *   new_cfar = Math.max(cfar * (1 + Δ_vol), 0)
+ *   A flat (net-notional-zero) currency can still carry real Component CFaR
+ *   from the cross-horizon residual case — vol_term/mu_term are both 0 for
+ *   these currencies (derived from net_notional_base), so they cannot be
+ *   used. This scales the static exact cfar directly instead — an interim
+ *   approximation, not the exact result. See applySimulation()'s full
+ *   docstring for the bug this replaced and the proper (deferred, backend-
+ *   touching) fix.
+ *
  * Spot slider (Δ_spot, selected currency only):
  *   new_cfar = Math.max(cfar * (1 + Δ_spot), 0)   ← exact: VaR ∝ E ∝ spot rate
  *
- * === SIMULATION APPROXIMATION — why the Period VaR strip diverges during sliding ===
+ * === SIMULATION APPROXIMATION — why the Period VaR strip AND the Stressed
+ *     Portfolio VaR figure both diverge from the exact value while sliding ===
  *
- * At Δ=0 (sliders at rest): component CFaRs sum EXACTLY to server-computed period_var
- * by the Euler decomposition theorem. The strip shows the exact value.
+ * At Δ=0 (sliders at rest): component CFaRs sum EXACTLY to the relevant
+ * server-computed value — period_var for the Risk Dashboard's active
+ * period, total_var for the Consolidated VaR card (these are the SAME
+ * number when the Risk Dashboard's period happens to be 'all' — see above)
+ * — by the Euler decomposition theorem.
  *
  * At Δ_vol ≠ 0: the vol slider scales each currency's vol_term independently.
- * Cross-currency correlations (ρ terms in the covariance matrix) are NOT recomputed
- * in the browser — doing so would require sending the full n×n matrix and running
- * matrix multiplication on every slider tick. The per-currency sum therefore slightly
- * OVERSTATES the true diversified VaR (conservative bias proportional to ρ).
+ * Cross-currency correlations (ρ terms in the covariance matrix) are NOT
+ * recomputed in the browser — doing so would require sending the full n×n
+ * matrix and running matrix multiplication on every slider tick. The
+ * per-currency sum therefore slightly OVERSTATES the true diversified VaR
+ * (conservative bias proportional to ρ). This applies identically to both
+ * the Period VaR strip and the Stressed Portfolio VaR figure, since both
+ * are built from the same applySimulation() summation pattern.
  *
  * This is a deliberate design tradeoff: fast live preview vs exact math.
  * All VaR math stays in Python. Re-running Calculate gives the exact figure.
@@ -94,10 +189,20 @@
 
 let dashboardData    = null;  // full 'dashboard' object from /calculate response
 let activePeriodKey  = '1m';  // key of currently displayed cumulative period
-let activeSpotCcy    = null;  // currency selected in spot slider dropdown
-let deltaSpot        = 0.0;   // current spot slider delta (−0.10 to +0.10)
-let deltaVol         = 0.0;   // current vol slider delta (−0.25 to +0.25)
+let activeSpotCcy    = null;  // currency selected in the Risk Dashboard's spot slider dropdown
+let deltaSpot        = 0.0;   // Risk Dashboard spot slider delta (−0.10 to +0.10)
+let deltaVol         = 0.0;   // Risk Dashboard vol slider delta (−0.25 to +0.25)
 let chart            = null;  // Chart.js instance (destroyed + recreated on period change)
+
+// --- Portfolio Scenario state (Consolidated Portfolio VaR card) — V3.2 ---
+// Fully independent from the Risk Dashboard state above: a separate slider
+// pair lives inside #results-consolidated and stresses that card's own
+// "Stressed Portfolio VaR" readout. Always operates on the 'all' cumulative
+// period (the full portfolio), regardless of which period is selected in
+// the Risk Dashboard's dropdown above. See updatePortfolioSimulation().
+let portfolioActiveSpotCcy = null;  // currency selected in the Portfolio Scenario dropdown
+let portfolioDeltaSpot     = 0.0;   // Portfolio Scenario spot slider delta (−0.10 to +0.10)
+let portfolioDeltaVol      = 0.0;   // Portfolio Scenario vol slider delta (−0.25 to +0.25)
 
 
 // ============================================================
@@ -111,11 +216,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Once registered globally, all Chart instances can use the 'datalabels' plugin
     // option — we configure it per-chart in renderChartForPeriod.
     // Guard in case the CDN fails to load (graceful degradation — bars still render,
-    // just without inside-bar CFaR labels).
+    // just without inside-bar net notional labels).
     if (typeof ChartDataLabels !== 'undefined') {
         Chart.register(ChartDataLabels);
     } else {
-        console.warn('chartjs-plugin-datalabels not loaded — CFaR labels inside bars disabled.');
+        console.warn('chartjs-plugin-datalabels not loaded — net notional labels inside bars disabled.');
     }
     /**
      * Listen for the custom event fired by the calculator JS after a
@@ -127,9 +232,9 @@ document.addEventListener('DOMContentLoaded', () => {
         renderDashboard(dashboardData);
     });
 
-    // Wire up period filter dropdown, currency picker, and both sliders.
-    // These elements exist in the DOM from page load but are hidden
-    // until renderDashboard() makes them visible.
+    // Wire up period filter dropdown, currency picker, and both Risk
+    // Dashboard sliders. These elements exist in the DOM from page load
+    // but are hidden until renderDashboard() makes them visible.
     document.getElementById('periodSelect')
         .addEventListener('change', handlePeriodChange);
 
@@ -141,6 +246,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('volSlider')
         .addEventListener('input', handleVolSlider);
+
+    // Wire up the Portfolio Scenario controls (Consolidated VaR card) — V3.2.
+    // Fully independent event chain from the Risk Dashboard controls above:
+    // these three call handlePortfolio*() handlers, which update only
+    // portfolioDeltaSpot/portfolioDeltaVol/portfolioActiveSpotCcy and only
+    // re-render the Consolidated VaR card's own "Stressed Portfolio VaR"
+    // figure — they never touch the Risk Dashboard chart or Period VaR strip.
+    document.getElementById('portfolioSpotCcySelect')
+        .addEventListener('change', handlePortfolioSpotCcyChange);
+
+    document.getElementById('portfolioSpotSlider')
+        .addEventListener('input', handlePortfolioSpotSlider);
+
+    document.getElementById('portfolioVolSlider')
+        .addEventListener('input', handlePortfolioVolSlider);
 });
 
 
@@ -150,20 +270,33 @@ document.addEventListener('DOMContentLoaded', () => {
 
 /**
  * Main render function. Called once each time Calculate is run successfully.
- * Resets simulation state, then builds all dashboard UI sections.
+ * Resets BOTH independent simulation states (Risk Dashboard sliders and
+ * Portfolio Scenario sliders), then builds all dashboard UI sections.
  *
- * Uses data.cumulative_periods for the bar chart (V3) and
- * data.buckets for the hedge effectiveness table (unchanged from V2).
+ * Uses data.cumulative_periods for the bar chart (V3) and the new Component
+ * CFaR bars (V3.2), and data.buckets for the hedge effectiveness table
+ * (unchanged from V2). The Portfolio Scenario panel (V3.2) also reads from
+ * data.cumulative_periods — specifically the 'all' entry — rather than any
+ * new field, since cumulative_vars['all'] is guaranteed by exposure_engine.py
+ * to equal consolidated_var exactly (see module docstring).
  *
  * @param {Object} data — the 'dashboard' key from the /calculate response
  */
 function renderDashboard(data) {
-    // Reset simulation sliders to centre (0 delta) on every new calculation
+    // Reset Risk Dashboard sliders to centre (0 delta) on every new calculation
     deltaSpot = 0.0;
     deltaVol  = 0.0;
     document.getElementById('spotSlider').value = 0;
     document.getElementById('volSlider').value  = 0;
     updateSliderDisplays();
+
+    // Reset Portfolio Scenario sliders too — independent state, independent
+    // reset, so a fresh Calculate always starts both slider pairs at rest.
+    portfolioDeltaSpot = 0.0;
+    portfolioDeltaVol  = 0.0;
+    document.getElementById('portfolioSpotSlider').value = 0;
+    document.getElementById('portfolioVolSlider').value  = 0;
+    updatePortfolioSliderDisplays();
 
     // Show the dashboard section (hidden until first run)
     document.getElementById('results-dashboard').style.display = 'block';
@@ -185,6 +318,18 @@ function renderDashboard(data) {
 
     // Hedge effectiveness table still uses per-bucket data (unchanged from V2)
     renderHedgeTable(data.buckets, data.base_ccy);
+
+    // Portfolio Scenario panel (Consolidated VaR card) — V3.2.
+    // Populates its currency dropdown from the 'all' period's currency list
+    // and computes the initial "Stressed Portfolio VaR" at Δ=0, which is
+    // exactly the Consolidated Portfolio VaR figure already shown above it
+    // (Euler decomposition theorem — see module docstring). This runs AFTER
+    // renderResults() in calculator.html has already populated and shown
+    // #results-consolidated (renderResults() runs synchronously before the
+    // 'varResultReady' event that triggers this function), so the card's
+    // static content is guaranteed to be in place by the time this executes.
+    renderPortfolioCurrencyDropdown(data.cumulative_periods);
+    updatePortfolioSimulation();
 }
 
 
@@ -273,38 +418,73 @@ function handlePeriodChange() {
 /**
  * Renders the Chart.js bar chart for the given cumulative period.
  * Destroys any existing chart first to avoid canvas re-use warnings.
+ * Also triggers renderCfarBarsForPeriod() so the Component CFaR bars below
+ * the chart stay in sync with whichever period is selected, and
+ * renderChartDetailPanel() so the fixed detail panel shows the
+ * largest-exposure currency by default.
  *
- * === CHART LAYOUT (V3.1) ===
+ * === CHART LAYOUT (V3.2) ===
  *
  * ONE dataset: net notional bars, coloured by net direction:
  *   Green  = net long  (receivable — FCY appreciation is a gain)
  *   Red    = net short (payable   — FCY appreciation costs more)
  *   Grey   = flat      (perfectly hedged within this time window)
  *
- * Component CFaR is printed INSIDE each bar via chartjs-plugin-datalabels
- * rather than shown as a separate blue bar. This avoids the proportion distortion
- * that the side-by-side layout caused when notional and CFaR were on very different
- * scales (e.g. large notional but low-vol currency → tiny CFaR bar looked broken).
+ * The printed label inside/above each bar is now the bar's OWN value — net
+ * notional — rather than Component CFaR. This is the V3.2 fix: previously
+ * the label showed a different quantity (CFaR) than the bar's height
+ * (notional), which user testing found confusing. Component CFaR is now
+ * shown in its own dedicated horizontal-bar section directly below this
+ * chart (see renderCfarBarsForPeriod()), and also surfaced — along with
+ * spot rate, vol, and horizon — in the fixed Chart Detail Panel below the
+ * legend (see renderChartDetailPanel()). See the module docstring's "TWO
+ * SEPARATE BAR SYSTEMS" section for the full rationale.
  *
- * === ZERO-NOTIONAL BARS ===
+ * Because the label now always equals the bar's own height, the old
+ * "zero-notional bar with a non-zero CFaR floating above it" special case
+ * no longer needs separate handling here: a currency with ~0 net notional
+ * in this window simply gets no label (there is nothing to report), while
+ * its Component CFaR — if any — is still visible, clearly, in the section
+ * below. (See that function's docstring for why such a currency can still
+ * carry meaningful risk despite zero notional: positions cancelling in
+ * notional but settling at different dates under the min(Tᵢ,Tⱼ) formula.)
  *
- * A currency can have zero net notional within a period but still carry a non-zero
- * Component CFaR. This happens when same-currency positions cancel in notional
- * (e.g. recv 2mn + pay 2mn = 0) but settle at different dates (T=43 vs T=100).
- * The min(Tᵢ,Tⱼ) covariance formula does NOT fully cancel them because they
- * don't co-exist for the same duration — the payable runs on after the receivable
- * settles, leaving residual risk. The CFaR label for such bars floats in blue above
- * the zero baseline. A tooltip on the chart title explains this to users.
+ * === V3.3 CHANGE: FIXED DETAIL PANEL REPLACES FLOATING TOOLTIP ===
+ *
+ * Chart.js's native floating tooltip (plugins.tooltip) is now fully
+ * disabled (`enabled: false`). It used to render per-currency details
+ * (Component CFaR, spot rate, vol, horizon) in a box anchored near the
+ * cursor. That box had a real, reproducible bug: for the LAST bar on the
+ * x-axis (no canvas space to its right), Chart.js flips the box leftward
+ * to keep it on-canvas — which places the box's pixels directly on top of
+ * the PREVIOUS bar's hover-detection column. Since the chart uses
+ * `interaction: { mode: 'index', intersect: false }`, hovering is driven
+ * purely by x-proximity to a bar — Chart.js has no concept of "the mouse
+ * is now over the tooltip box itself," so moving the mouse left to read
+ * the box immediately re-triggers hover on the previous bar instead,
+ * collapsing the very box the user was trying to read. This made the last
+ * bar's tooltip effectively unreadable.
+ *
+ * The fix replaces the floating canvas box with `onHover` (below) driving
+ * a real, fixed-position DOM element (#dashChartDetail, rendered by
+ * renderChartDetailPanel()) that sits below the chart's legend. Because
+ * its screen position never overlaps any bar's hover-detection zone — for
+ * ANY bar, on ANY chart width — this failure mode is structurally
+ * impossible, not just less likely.
  *
  * === DATALABELS POSITIONING LOGIC ===
  *
  * The chartjs-plugin-datalabels anchor/align are set per-bar as functions:
- *   - Zero-height bar (|net notional| ≈ 0): anchor='end', align='top' → floats above
- *   - Short bar (<40px): anchor='end', align based on sign → outside the bar tip
- *   - Tall bar (≥40px): anchor='center', align='center' → centred inside the bar
+ *   - Short bar (<40px) or zero bar: anchor='end', align based on sign →
+ *     label sits just outside the bar tip (or is hidden entirely if the
+ *     bar's value rounds to zero — see the `display` callback).
+ *   - Tall bar (≥40px): anchor='center', align='center' → centred inside
+ *     the bar, white text.
+ * Threshold of 40px is empirically chosen for 11px font + 8px padding.
  *
- * CFaR values are stored on chart._cfarValues[] (set after chart creation, updated
- * by updateChartSimulation) so the datalabels formatter always reads current values.
+ * Component CFaR is still tracked on chart._cfarValues[] (set after chart
+ * creation, updated by updateChartSimulation) — it no longer feeds a
+ * tooltip, but renderChartDetailPanel() reads it for the same purpose.
  *
  * @param {string} periodKey — e.g. '3m'
  */
@@ -319,10 +499,18 @@ function renderChartForPeriod(periodKey) {
     const canvasEl = document.getElementById('dashExposureChart');
 
     if (!period || period.currencies.length === 0) {
-        // No data for this period — show placeholder, hide canvas
+        // No data for this period — show placeholder, hide canvas.
+        // The Component CFaR section below shows its own matching empty
+        // state (renderCfarBarsForPeriod handles a null/empty period itself),
+        // and the Chart Detail Panel shows its own empty state too.
         emptyEl.style.display  = 'flex';
         canvasEl.style.display = 'none';
         renderPeriodInfoStrip(period || { period_var: 0, n_positions: 0, max_days: null });
+        renderCfarBarsForPeriod(periodKey);
+        const detailPanel = document.getElementById('dashChartDetail');
+        if (detailPanel) {
+            detailPanel.innerHTML = '<div class="cdp-empty">No exposure data for this time period.</div>';
+        }
         return;
     }
 
@@ -352,8 +540,12 @@ function renderChartForPeriod(periodKey) {
             datasets: [
                 {
                     // === SINGLE DATASET: net notional bars ===
-                    // Component CFaR is shown as text labels INSIDE these bars
-                    // via chartjs-plugin-datalabels (configured in options.plugins.datalabels).
+                    // The printed label (configured under datalabels below)
+                    // shows this SAME value — net notional — not Component
+                    // CFaR. Component CFaR has its own bar section below
+                    // the chart (renderCfarBarsForPeriod) and remains
+                    // available on hover via the fixed Chart Detail Panel
+                    // (renderChartDetailPanel) rather than a floating tooltip.
                     label:              `Net Exposure (${baseCcy})`,
                     data:               netExposures,
                     backgroundColor:    barColors,
@@ -366,59 +558,46 @@ function renderChartForPeriod(periodKey) {
             responsive:          true,
             maintainAspectRatio: false,
             interaction: { mode: 'index', intersect: false },
+
+            /**
+             * onHover replaces the floating tooltip's job of detecting which
+             * bar the mouse is closest to (same 'index'/intersect:false
+             * hit-testing Chart.js already uses internally for tooltips —
+             * we're just reading its result instead of letting it draw a
+             * canvas box with it). See this function's docstring, "V3.3
+             * CHANGE: FIXED DETAIL PANEL REPLACES FLOATING TOOLTIP", for why.
+             *
+             * activeElements is empty when the mouse is outside the canvas
+             * entirely (not just between bars — 'index' mode with
+             * intersect:false still resolves to the nearest bar anywhere
+             * inside the plotting area). When empty, we revert to showing
+             * the default (largest-exposure) currency rather than leaving a
+             * stale hover state or an empty panel.
+             */
+            onHover: (event, activeElements) => {
+                renderChartDetailPanel(
+                    activeElements && activeElements.length > 0 ? activeElements[0].index : 0
+                );
+            },
+
             plugins: {
                 legend: { display: false },
 
-                // ── TOOLTIP ──────────────────────────────────────────────────
-                tooltip: {
-                    backgroundColor: '#1a1e25',
-                    borderColor:     '#2e3440',
-                    borderWidth:     1,
-                    titleColor:      '#e8eaf0',
-                    bodyColor:       '#6b7280',
-                    padding:         12,
-                    callbacks: {
-                        label: ctx =>
-                            `Net Exposure (${baseCcy}): ${baseCcy} ${fmtNum(ctx.parsed.y)}`,
-                        afterBody: (items) => {
-                            const idx = items[0]?.dataIndex;
-                            if (idx === undefined) return [];
-                            const c = currencies[idx];
+                // Floating tooltip fully disabled — replaced by the fixed
+                // #dashChartDetail panel via onHover above + renderChartDetailPanel().
+                tooltip: { enabled: false },
 
-                            // Read CFaR from chart._cfarValues so tooltip shows
-                            // the simulated value (not the static pre-computed one)
-                            const cfarVal = chart?._cfarValues?.[idx] ?? c.cfar;
-
-                            // Flag zero-notional-but-nonzero-CFaR (cross-horizon case)
-                            const isZeroNotional = Math.abs(c.net_notional_base) < 100;
-                            const crossHorizonNote = (isZeroNotional && Math.abs(cfarVal) > 0)
-                                ? ['ⓘ Zero net notional — CFaR from cross-horizon T mismatch']
-                                : [];
-
-                            return [
-                                `Component CFaR:  ${baseCcy} ${fmtNum(cfarVal)}`,
-                                `Direction:       ${c.net_direction.toUpperCase()}`,
-                                `Spot rate:       ${c.spot_rate.toFixed(4)} ${baseCcy}/1 ${c.currency}`,
-                                `Ann. vol:        ${c.annualised_vol_pct.toFixed(2)}%`,
-                                `Eff. horizon:    ${c.effective_T.toFixed(0)} trading days`,
-                                ...crossHorizonNote,
-                                ...(deltaSpot !== 0 || deltaVol !== 0 ? ['— simulation active —'] : []),
-                            ];
-                        },
-                    },
-                },
-
-                // ── DATALABELS — Component CFaR printed inside bars ───────────
+                // ── DATALABELS — net notional value printed inside bars ────────
                 // chartjs-plugin-datalabels is registered globally in DOMContentLoaded.
-                // Reads from chart._cfarValues[] which is set after chart creation and
-                // updated by updateChartSimulation on every slider tick.
+                // V3.2: reads directly from the bar's own dataset value (net
+                // notional) rather than from chart._cfarValues, so the printed
+                // number always matches what the bar's height visually shows.
                 datalabels: {
                     /**
-                     * formatter: shows Component CFaR (not net notional).
-                     * Always shows absolute value — negative component CFaR (hedging
-                     * positions) is visually represented as zero bar height; the signed
-                     * value is preserved in period_var and explained in the tooltip.
-                     * Returns '' (empty) to hide the label if CFaR is effectively zero.
+                     * formatter: shows net notional — the bar's own value.
+                     * Returns '' (empty) to hide the label when the value is
+                     * effectively zero (nothing meaningful to report for a
+                     * fully-netted "flat" currency in this window).
                      *
                      * MOBILE FIX: on narrow (phone-width) charts, drop the repeated
                      * currency prefix — it's already shown once in the y-axis title
@@ -432,11 +611,8 @@ function renderChartForPeriod(periodKey) {
                      * — see isNarrowChart() above for the threshold.
                      */
                     formatter: (value, ctx) => {
-                        const cfarList = ctx.chart._cfarValues;
-                        if (!cfarList) return '';
-                        const cfar = cfarList[ctx.dataIndex] ?? 0;
-                        if (Math.abs(cfar) < 1) return '';  // hide near-zero labels
-                        const amount = Math.round(Math.abs(cfar));
+                        if (Math.abs(value) < 1) return '';  // hide near-zero labels
+                        const amount = Math.round(Math.abs(value));
                         return isNarrowChart(ctx.chart)
                             ? fmtShort(amount)
                             : `${baseCcy} ${fmtNum(amount)}`;
@@ -445,21 +621,21 @@ function renderChartForPeriod(periodKey) {
                     /**
                      * anchor: determines which edge of the bar the label attaches to.
                      *   'center' → label at the vertical midpoint of the bar (tall bars)
-                     *   'end'    → label at the tip of the bar (short bars / zero bars)
+                     *   'end'    → label at the tip of the bar (short or zero bars)
                      * Threshold of 40px is empirically chosen for 11px font + 8px padding.
                      */
                     anchor: (ctx) => {
                         try {
                             const el  = ctx.chart.getDatasetMeta(ctx.datasetIndex).data[ctx.dataIndex];
                             const h   = Math.abs((el?.base ?? 0) - (el?.y ?? 0));
-                            return h < 4 ? 'end' : h < 40 ? 'end' : 'center';
+                            return h < 40 ? 'end' : 'center';
                         } catch (_) { return 'center'; }
                     },
 
                     /**
                      * align: which side of the anchor point the label appears on.
                      *   'center' → centred on the anchor (inside the bar)
-                     *   'top'    → above the anchor (outside positive short bars / zero bars)
+                     *   'top'    → above the anchor (outside positive short bars)
                      *   'bottom' → below the anchor (outside negative short bars)
                      */
                     align: (ctx) => {
@@ -467,23 +643,16 @@ function renderChartForPeriod(periodKey) {
                             const el  = ctx.chart.getDatasetMeta(ctx.datasetIndex).data[ctx.dataIndex];
                             const h   = Math.abs((el?.base ?? 0) - (el?.y ?? 0));
                             const val = ctx.dataset.data[ctx.dataIndex];
-                            if (h < 4)  return 'top';            // zero bar: float above baseline
                             if (h < 40) return val >= 0 ? 'top' : 'bottom';  // short bar: outside
-                            return 'center';                      // tall bar: inside centre
+                            return 'center';                                 // tall bar: inside centre
                         } catch (_) { return 'center'; }
                     },
 
-                    /**
-                     * color: white inside normal bars; blue for zero-notional floating labels.
-                     * Blue signals "this CFaR comes from cross-horizon mismatch, not net exposure"
-                     * which matches the blue used for the info/link colour in the rest of the UI.
-                     */
-                    color: (ctx) => {
-                        const val = ctx.dataset.data[ctx.dataIndex];
-                        return Math.abs(val) < 100
-                            ? 'rgba(96, 165, 250, 0.95)'   // blue: zero-notional label
-                            : 'rgba(255, 255, 255, 0.92)'; // white: normal label inside bar
-                    },
+                    // White text for every label — the "zero-notional blue label"
+                    // case from V3.1 no longer applies, since a zero-value bar now
+                    // simply has no label at all (see `display` below) rather than
+                    // a floating CFaR figure that needed a distinguishing colour.
+                    color: 'rgba(255, 255, 255, 0.92)',
 
                     /**
                      * font: 11px on charts with room to spare. Drops to 9px on narrow
@@ -498,12 +667,8 @@ function renderChartForPeriod(periodKey) {
                     }),
                     padding: { top: 4, bottom: 4, left: 6, right: 6 },
 
-                    // hide label entirely if CFaR rounds to zero (nothing meaningful to show)
-                    display: (ctx) => {
-                        const cfarList = ctx.chart._cfarValues;
-                        if (!cfarList) return false;
-                        return Math.abs(cfarList[ctx.dataIndex] ?? 0) >= 1;
-                    },
+                    // hide label entirely if net notional rounds to zero
+                    display: (ctx) => Math.abs(ctx.dataset.data[ctx.dataIndex] ?? 0) >= 1,
 
                     // prevent labels from overflowing outside the chart canvas
                     clamp: true,
@@ -525,7 +690,7 @@ function renderChartForPeriod(periodKey) {
                     },
                     title: {
                         display: true,
-                        text:    `Net Exposure (${baseCcy}) — Component CFaR printed inside bars`,
+                        text:    `Net Exposure (${baseCcy})`,
                         color:   '#6b7280',
                         font:    { family: "'DM Mono'", size: 11 },
                     },
@@ -534,23 +699,139 @@ function renderChartForPeriod(periodKey) {
         },
     });
 
-    // Store the initial Component CFaR values on the chart instance.
-    // The datalabels formatter reads from chart._cfarValues on every render.
-    // updateChartSimulation() updates this array (and calls chart.update()) so
-    // the inside-bar labels always reflect the current simulation state without
-    // needing to destroy and recreate the chart.
+    // Store the current Component CFaR values AND the raw currencies array
+    // on the chart instance. _cfarValues is read by renderChartDetailPanel()
+    // (V3.3 — previously read by the floating tooltip's afterBody callback,
+    // now removed) so a hovered/default currency always shows the live
+    // simulated value rather than the static pre-computed one. _currencies
+    // gives renderChartDetailPanel() access to the static fields (spot
+    // rate, vol, horizon, direction) that never change with simulation.
+    // updateChartSimulation() refreshes _cfarValues (not _currencies, which
+    // is static per period) on every slider tick.
+    //
+    // Note: unlike V3.1, no forced chart.update('none') call is needed here.
+    // The datalabels plugin now reads its formatter/display values directly
+    // from the dataset passed into `new Chart(...)` above, which is already
+    // available during Chart.js's synchronous initial render — there is no
+    // longer a dependency on data set *after* construction completes.
     chart._cfarValues = [...cfarValues];
-
-    // IMPORTANT: chart._cfarValues must be set BEFORE the datalabels plugin
-    // reads it. Chart.js fires its initial render synchronously during
-    // new Chart(...) above, at which point _cfarValues does not yet exist,
-    // so the datalabels display() function returns false and hides all labels.
-    // chart.update('none') forces a second render (no animation) now that
-    // _cfarValues is populated, making the CFaR labels visible immediately
-    // without requiring the user to hover over any bar.
-    chart.update('none');
+    chart._currencies = currencies;
 
     renderPeriodInfoStrip(period);
+    renderCfarBarsForPeriod(periodKey);
+
+    // Populate the Chart Detail Panel immediately with the largest-exposure
+    // currency (index 0 — currencies arrive pre-sorted by |net_notional_base|
+    // descending from dashboard_engine.py), so it's never empty on first
+    // render and the user doesn't have to hover before seeing anything.
+    renderChartDetailPanel(0);
+}
+
+
+// ============================================================
+// CHART DETAIL PANEL  (V3.3 — replaces the floating Chart.js tooltip)
+// ============================================================
+
+/**
+ * Renders the fixed-position hover-detail panel for the Net Exposure chart,
+ * into the #dashChartDetail container (a plain <div> below the chart's
+ * legend, NOT a canvas-anchored floating tooltip — see renderChartForPeriod's
+ * docstring, "V3.3 CHANGE: FIXED DETAIL PANEL REPLACES FLOATING TOOLTIP",
+ * for the bug this fixes and why a fixed DOM element is the structural fix
+ * rather than a cosmetic one).
+ *
+ * Called from three places:
+ *   1. renderChartForPeriod() — once, with idx=0, immediately after building
+ *      a new chart, so the panel is never empty on first render.
+ *   2. The chart's onHover callback — with whichever bar's index the mouse
+ *      is currently closest to (or 0 when the mouse leaves the canvas).
+ *   3. updateChartSimulation() — with the currently-displayed index, so the
+ *      panel's Component CFaR / Net Exposure figures stay live while a
+ *      slider is being dragged, even if the mouse isn't currently hovering
+ *      the chart at all (e.g. the user is looking at the panel while
+ *      dragging a slider with their other hand/a touch device).
+ *
+ * @param {number} idx — index into chart._currencies / the active dataset
+ */
+function renderChartDetailPanel(idx) {
+    const panel = document.getElementById('dashChartDetail');
+    if (!panel || !chart || !chart._currencies || chart._currencies.length === 0) return;
+
+    // Clamp defensively. Chart.js's onHover always reports a valid index for
+    // the active dataset, but this guards against a stale callback firing
+    // mid-rebuild (e.g. a slider event landing between chart.destroy() and
+    // the next new Chart(...) call), where chart._currencies could already
+    // belong to a different, shorter list than the index was computed for.
+    const safeIdx = Math.max(0, Math.min(idx, chart._currencies.length - 1));
+
+    // Remembered so updateChartSimulation() can re-render the SAME currency
+    // the panel is currently showing (whatever the user last hovered, or the
+    // index-0 default) with fresh simulated values on every slider tick,
+    // without needing to re-detect what's under the mouse.
+    chart._activeDetailIndex = safeIdx;
+
+    const c       = chart._currencies[safeIdx];
+    const baseCcy = dashboardData.base_ccy;
+
+    // Read CURRENT simulated values from the chart's own live dataset/cache
+    // rather than the static c.net_notional_base / c.cfar fields, so the
+    // panel reflects slider state exactly like the bars do.
+    const netNotional = chart.data.datasets[0].data[safeIdx];
+    const cfarVal      = chart._cfarValues?.[safeIdx] ?? c.cfar;
+
+    // Cross-horizon case note. This is now the ONE place this explanation
+    // lives — it used to also be spelled out in full inside the Component
+    // CFaR section's header tooltip below, but that made that tooltip long
+    // and generic (the same wall of text regardless of whether anything in
+    // the current view actually exhibits this case). Moving the full
+    // explanation here instead makes it CONTEXTUAL: it only appears
+    // attached to a currency that is actually, currently exhibiting zero
+    // notional with non-zero CFaR — see _cfarSection's header tooltip in
+    // calculator.html for the shorter, general explanation of what
+    // Component CFaR means that remains there.
+    //
+    // Uses the same .dash-tooltip-icon / .tip-inline mechanism as every
+    // other "ⓘ" in this app — a plain CSS :hover::after popup reading the
+    // data-tip attribute directly off the DOM. This is NOT the Chart.js
+    // canvas-anchored floating tooltip that was removed (see
+    // renderChartForPeriod's "V3.3 CHANGE" docstring section) — it has no
+    // dependency on chart hover/index detection or canvas geometry at all,
+    // so it cannot reproduce that bug. It works correctly here even though
+    // this whole panel's innerHTML is rebuilt on every hover, because the
+    // underlying CSS rule matches on the data-tip attribute at hover-time,
+    // not on any JS-side wiring done per element.
+    const isZeroNotional = Math.abs(c.net_notional_base) < 100;
+    const crossHorizonNote = (isZeroNotional && Math.abs(cfarVal) > 0)
+        ? `<div class="cdp-note">Zero net notional — see Component CFaR bars below
+             <span class="dash-tooltip-icon tip-inline" data-tip="This currency shows zero or near-zero net notional above but still carries Component CFaR, because its positions settle at different dates — for example, a receivable at T=43 days and a payable at T=100 days cancel in notional but not in risk, since the payable runs 57 extra days uncovered after the receivable settles (the min(Tᵢ,Tⱼ) covariance formula captures this: the cross-term between the two positions uses min(43,100)=43, the same value as the receivable's own variance term, so the receivable's marginal contribution collapses to zero while the payable's does not). The bars below show this risk on its own scale, separately from net notional.">ⓘ</span>
+           </div>`
+        : '';
+    const simNote = (deltaSpot !== 0 || deltaVol !== 0)
+        ? '<div class="cdp-note cdp-note-sim">— simulation active —</div>'
+        : '';
+
+    // Label : value pairs, in the same order and with the same content the
+    // old floating tooltip showed — feature parity, just relocated to a
+    // fixed, always-on-screen element instead of a cursor-anchored box.
+    panel.innerHTML = `
+        <div class="cdp-header">${c.currency}</div>
+        <div class="cdp-grid">
+          <div class="cdp-label">Net Exposure</div>
+          <div class="cdp-value">${baseCcy} ${fmtNum(netNotional)}</div>
+          <div class="cdp-label">Component CFaR</div>
+          <div class="cdp-value">${baseCcy} ${fmtNum(cfarVal)}</div>
+          <div class="cdp-label">Direction</div>
+          <div class="cdp-value">${c.net_direction.toUpperCase()}</div>
+          <div class="cdp-label">Spot rate</div>
+          <div class="cdp-value">${c.spot_rate.toFixed(4)} ${baseCcy}/1 ${c.currency}</div>
+          <div class="cdp-label">Ann. vol</div>
+          <div class="cdp-value">${c.annualised_vol_pct.toFixed(2)}%</div>
+          <div class="cdp-label">Eff. horizon</div>
+          <div class="cdp-value">${c.effective_T.toFixed(0)} trading days</div>
+        </div>
+        ${crossHorizonNote}
+        ${simNote}
+    `;
 }
 
 
@@ -595,6 +876,112 @@ function renderPeriodInfoStrip(period) {
 
 
 // ============================================================
+// COMPONENT CFaR BARS  (V3.2 — new, separate from the notional chart)
+// ============================================================
+
+/**
+ * Renders the Component CFaR horizontal bar section beneath the notional
+ * chart, inside the #dashCfarBars container. Plain HTML/CSS — no Chart.js
+ * instance, no canvas — since these bars only ever need a simple
+ * proportional width, not interactive tooltips or axes.
+ *
+ * === WHY A SEPARATE BAR SYSTEM (see module docstring for full rationale) ===
+ *
+ * Bar LENGTH here = Component CFaR, on its OWN scale — completely
+ * independent of the notional chart's scale above. This directly answers
+ * "what can I lose?" without being entangled with "where is my money?"
+ * (the notional chart's question). A currency can show a small or zero bar
+ * in the notional chart above but the LONGEST bar here, when it carries
+ * disproportionate risk relative to its position size (e.g. an exotic,
+ * high-volatility currency, or residual risk from same-currency positions
+ * that cancel in notional but settle at different dates under the
+ * min(Tᵢ,Tⱼ) covariance formula). That is the entire point of this
+ * section — to make that case visible and self-explanatory rather than
+ * a confusing label inside an unrelated bar.
+ *
+ * === SCALING AND SORTING ===
+ *
+ * Bar widths are scaled relative to the LARGEST |Component CFaR| present
+ * in the currently selected period (not relative to net notional, and not
+ * relative to Period VaR) — so the single riskiest currency always renders
+ * a full-width reference bar, exactly like the existing .compare-bars
+ * pattern used in the Cash Book Risk diversification display (gross vs.
+ * net VaR on a shared scale). Rows are sorted by |Component CFaR|
+ * descending, so the biggest threat always appears first regardless of how
+ * the notional chart above happens to be ordered.
+ *
+ * A small minimum width (2%) is applied to any non-trivial (≥ 1 unit) CFaR
+ * so it remains visibly present as a sliver even when dwarfed by the
+ * largest bar in the period, rather than rendering as an invisible
+ * zero-width track.
+ *
+ * === SIMULATION ===
+ *
+ * Called both on initial period render (from renderChartForPeriod) and on
+ * every Risk Dashboard slider tick (from updateChartSimulation), using the
+ * SAME applySimulation() function as the notional chart — so both bar
+ * systems always reflect identical, internally consistent slider deltas.
+ *
+ * @param {string} periodKey — e.g. '3m'; looked up fresh from dashboardData
+ *                              each call rather than passed pre-resolved,
+ *                              so this function is safe to call independently
+ *                              of renderChartForPeriod's own period lookup.
+ */
+function renderCfarBarsForPeriod(periodKey) {
+    const container = document.getElementById('dashCfarBars');
+    if (!container || !dashboardData) return;
+
+    const period = dashboardData.cumulative_periods.find(p => p.key === periodKey);
+
+    if (!period || period.currencies.length === 0) {
+        container.innerHTML =
+            '<div class="cfar-bars-empty">No exposure data for this time period.</div>';
+        return;
+    }
+
+    const baseCcy = dashboardData.base_ccy;
+
+    // Apply current Risk Dashboard simulation deltas — identical inputs to
+    // the notional chart above, so both sections always stay consistent
+    // with each other and with the Period VaR strip's running total.
+    const rows = period.currencies.map(c => {
+        const sim = applySimulation(c, deltaSpot, deltaVol, activeSpotCcy);
+        return { currency: c.currency, direction: c.net_direction, cfar: sim.cfar };
+    });
+
+    // Sort by risk magnitude descending — the biggest threat renders first,
+    // independent of the notional chart's own currency ordering above.
+    rows.sort((a, b) => Math.abs(b.cfar) - Math.abs(a.cfar));
+
+    // Scale every bar relative to the largest CFaR in this period. The 0.01
+    // floor guards against a divide-by-zero when every currency is fully
+    // hedged (all component CFaRs are zero) within the selected window.
+    const maxAbsCfar = Math.max(...rows.map(r => Math.abs(r.cfar)), 0.01);
+
+    container.innerHTML = rows.map(r => {
+        const absCfar  = Math.abs(r.cfar);
+        // Proportional width, with a 2% visible-sliver floor for any
+        // non-trivial (≥1 unit) CFaR so it never renders as an invisible
+        // zero-width track purely due to being dwarfed by the top bar.
+        const pct      = absCfar >= 1
+            ? Math.max((absCfar / maxAbsCfar) * 100, 2)
+            : 0;
+        const dirClass = r.direction;  // 'long' | 'short' | 'flat' — matches bar/legend colours above
+        return `
+          <div class="cfar-bar-row">
+            <div class="cfar-bar-label">
+              <span class="cfar-bar-ccy">${r.currency}</span>
+            </div>
+            <div class="cfar-bar-track">
+              <div class="cfar-bar-fill ${dirClass}" style="width:${pct}%"></div>
+            </div>
+            <div class="cfar-bar-value">${baseCcy} ${fmtNum(r.cfar)}</div>
+          </div>`;
+    }).join('');
+}
+
+
+// ============================================================
 // SIMULATION
 // ============================================================
 
@@ -608,7 +995,7 @@ function renderPeriodInfoStrip(period) {
  *   new_net_notional = net_notional_base × (1 + Δ_spot)
  *   new_cfar         = cfar × (1 + Δ_spot)   ← exact (VaR ∝ E ∝ spot_rate)
  *
- * Vol shift (all currencies):
+ * Vol shift (long/short currencies):
  *   new_cfar_long  = max(vol_term × (1 + Δ_vol) − mu_term, 0)
  *   new_cfar_short = max(vol_term × (1 + Δ_vol) + mu_term, 0)
  *   Note: mu_term does NOT scale with vol — drift is independent of vol regime.
@@ -617,6 +1004,59 @@ function renderPeriodInfoStrip(period) {
  * For period currencies, vol_term and mu_term use the exposure-weighted
  * effective_T (a per-currency approximation for multi-horizon periods).
  * For single-position currencies the formula is exact.
+ *
+ * Vol shift (flat currencies — V3.5 INTERIM FIX, see below):
+ *   new_cfar = max(cfar × (1 + Δ_vol), 0)
+ *
+ * === V3.5 BUG FIX: FLAT CURRENCIES NO LONGER SNAP TO ZERO ON ANY VOL MOVE ===
+ *
+ * Previously this branch was `cfar = 0` unconditionally whenever
+ * net_direction === 'flat' and dVol !== 0 — i.e. ANY non-zero vol delta,
+ * even ±0.1%, instantly zeroed a flat currency's CFaR. This was wrong: a
+ * currency can be net-flat in notional while still carrying real, non-zero
+ * Component CFaR from the cross-horizon residual case (same-currency
+ * positions that cancel in notional but settle at different dates — see
+ * renderChartDetailPanel()'s cross-horizon tooltip for the full
+ * min(Tᵢ,Tⱼ) explanation). That residual risk doesn't vanish just because
+ * a vol slider moved a fraction of a percent; it should scale smoothly
+ * with the vol regime, not collapse discontinuously to zero.
+ *
+ * WHY vol_term/mu_term CAN'T BE USED HERE: both are precomputed server-side
+ * as `net_notional_base × (something)` (see dashboard_engine.py's
+ * _process_currency_entry). For a flat currency, net_notional_base = 0, so
+ * vol_term = 0 and mu_term = 0 are already baked in from the backend —
+ * using them would still produce zero regardless of this function's logic.
+ * They were designed assuming "one currency = one net position," which
+ * does not hold for the cross-horizon residual case (the real Component
+ * CFaR there comes from the INDIVIDUAL receivable/payable legs, not from
+ * their — zero — sum).
+ *
+ * INTERIM APPROXIMATION (this fix): scale the static, exact ccy.cfar
+ * directly by (1 + Δ_vol), treating the entire residual as if it were pure
+ * volatility-driven risk. This is NOT exact — it ignores whatever (usually
+ * small) drift contribution is mixed into that residual, which we cannot
+ * separate out without a proper per-position vol/drift decomposition. But
+ * it is a much better approximation than snapping to zero: it moves
+ * smoothly and in the right direction as the vol slider moves, with no
+ * discontinuity at Δ_vol = 0.
+ *
+ * TODO — PROPER FIX (flagged for a future, backend-touching change): there
+ * is an EXACT fix available, not just a better approximation. Under a
+ * UNIFORM vol-regime shift (every currency's σ scaled by the same factor
+ * k = 1+Δ_vol, which is what this slider does), the volatility-driven part
+ * of EVERY position's Component VaR scales EXACTLY linearly by k — this
+ * follows from the covariance matrix being homogeneous of degree 2 in σ
+ * (every Σ[i,j] term contains σᵢ×σⱼ, so the whole matrix scales by k²,
+ * which exactly cancels against portfolio vol's own k-scaling in the
+ * component formula sᵢ(Σs)ᵢ/σ_p). This holds regardless of net notional —
+ * including the flat/cross-horizon case. To use this exactly, the backend
+ * (exposure_engine.py's _compute_component_vars_by_currency) would need to
+ * expose two new per-currency sums — the vol-driven part and the
+ * drift-driven part of Component CFaR, computed from the real per-position
+ * structure — rather than the current net_notional_base-derived
+ * vol_term/mu_term. That is an engine-file change (branch first, per
+ * project convention), deliberately deferred here in favour of this
+ * smaller, frontend-only interim patch.
  *
  * @param {Object} ccy     — currency entry (from either buckets or cumulative_periods)
  * @param {number} dSpot   — spot delta for the selected currency (−0.10 to +0.10)
@@ -640,8 +1080,11 @@ function applySimulation(ccy, dSpot, dVol, spotCcy) {
             // Short: CFaR_short = vol_term*(1+Δv) + mu_term  [drift hurts you]
             cfar = Math.max(newVolTerm + ccy.mu_term, 0);
         } else {
-            // Flat: no exposure → zero CFaR regardless of vol
-            cfar = 0;
+            // Flat (net notional ≈ 0, so vol_term/mu_term are both 0 — see
+            // this function's "V3.5 BUG FIX" docstring section above for
+            // the full explanation). INTERIM approximation: scale the
+            // static exact cfar directly, rather than snapping to zero.
+            cfar = Math.max(ccy.cfar * (1 + dVol), 0);
         }
     } else {
         // No vol shift — use the pre-computed exact CFaR from the engine
@@ -662,11 +1105,17 @@ function applySimulation(ccy, dSpot, dVol, spotCcy) {
 /**
  * Re-renders the chart data with current simulation deltas, without
  * recreating the Chart.js instance (uses chart.update('none') for
- * smooth performance, skipping animation).
- *
- * Also updates the Period VaR strip to show the sum of simulated component
+ * smooth performance, skipping animation). Also re-renders the Component
+ * CFaR bar section below the chart, refreshes the Chart Detail Panel (V3.3)
+ * with live values for whichever currency it's currently showing, and
+ * updates the Period VaR strip to show the sum of simulated component
  * CFaRs as an approximation. (Exact period VaR needs the full covariance
  * matrix — use the pre-computed value in period.period_var for accuracy.)
+ *
+ * Note: this function drives ONLY the Risk Dashboard's chart, CFaR bars,
+ * detail panel, and Period VaR strip — it has no effect on the Consolidated
+ * VaR card's independent Portfolio Scenario sliders/figure (see
+ * updatePortfolioSimulation()).
  */
 function updateChartSimulation() {
     if (!chart || !dashboardData) return;
@@ -679,21 +1128,38 @@ function updateChartSimulation() {
     );
 
     // Push simulated net notional values into the single bar dataset.
+    // The datalabels formatter (configured in renderChartForPeriod) reads
+    // this same dataset directly, so updating it here also refreshes the
+    // inside-bar net notional labels automatically — no separate label
+    // array needs to be kept in sync for that purpose.
     chart.data.datasets[0].data = simulated.map(s => s.netNotional);
 
-    // Update the CFaR values stored on the chart instance. The datalabels formatter
-    // reads from chart._cfarValues on every render, so updating this array and
-    // calling chart.update() refreshes the inside-bar labels automatically.
-    // There is NO second dataset — CFaR is displayed as text labels, not bars.
+    // Update the CFaR values stored on the chart instance — read by
+    // renderChartDetailPanel() below (V3.3 — previously read by the
+    // floating tooltip's afterBody callback, now removed).
     chart._cfarValues = simulated.map(s => s.cfar);
 
     chart.update('none');   // 'none' = no animation, for a responsive feel
+
+    // Keep the Component CFaR bar section below the chart in sync with the
+    // same simulation deltas just applied to the notional chart above.
+    renderCfarBarsForPeriod(activePeriodKey);
+
+    // Keep the Chart Detail Panel showing live values too, for whichever
+    // currency it's currently displaying (last hovered, or the index-0
+    // default — see chart._activeDetailIndex, set by renderChartDetailPanel).
+    // This matters even when the mouse isn't over the chart at all: a user
+    // dragging a slider with one hand while reading the panel should see it
+    // update in step with the bars, not go stale until their next hover.
+    renderChartDetailPanel(chart._activeDetailIndex ?? 0);
 
     // Update the Period VaR strip to the sum of current component CFaRs.
     //
     // === WHY THIS IS ALWAYS CONSISTENT WITH THE BARS ===
     //
-    // The Period VaR strip always shows the column total of the bars above it.
+    // The Period VaR strip always shows the column total of the Component
+    // CFaR bars above it (now rendered separately by renderCfarBarsForPeriod,
+    // not as labels inside the notional chart — see module docstring).
     // At Δ=0: components equal the exact server-side covariance decomposition,
     //   and their sum equals period.period_var exactly (Euler decomposition theorem).
     //   This is NOT a simple independent sum — the components already encode all
@@ -725,14 +1191,24 @@ function handleVolSlider() {
     updateChartSimulation();
 }
 
-/** Refreshes the % labels displayed next to both sliders. */
+/**
+ * Formats a slider delta as a signed percentage string, e.g. 0.1 → "+10.0%",
+ * -0.025 → "-2.5%". Shared by both independent slider pairs (Risk Dashboard
+ * and Portfolio Scenario) so the display formatting logic exists in exactly
+ * one place rather than being duplicated per slider pair.
+ *
+ * @param {number} delta — slider delta as a decimal fraction (e.g. 0.1 = +10%)
+ * @returns {string}
+ */
+function _formatSliderPercent(delta) {
+    const pct = (delta * 100).toFixed(1);
+    return delta >= 0 ? `+${pct}%` : `${pct}%`;
+}
+
+/** Refreshes the % labels displayed next to the Risk Dashboard's two sliders. */
 function updateSliderDisplays() {
-    const sp = (deltaSpot * 100).toFixed(1);
-    const vp = (deltaVol  * 100).toFixed(1);
-    document.getElementById('dashSpotValue').textContent =
-        deltaSpot >= 0 ? `+${sp}%` : `${sp}%`;
-    document.getElementById('dashVolValue').textContent =
-        deltaVol >= 0 ? `+${vp}%` : `${vp}%`;
+    document.getElementById('dashSpotValue').textContent = _formatSliderPercent(deltaSpot);
+    document.getElementById('dashVolValue').textContent  = _formatSliderPercent(deltaVol);
 }
 
 
@@ -768,6 +1244,110 @@ function renderSpotCurrencyDropdown(periods) {
     // Default to first currency
     const first = seen.values().next().value;
     if (first) { sel.value = first; activeSpotCcy = first; }
+}
+
+
+// ============================================================
+// PORTFOLIO SCENARIO  (V3.2 — independent sliders, Consolidated VaR card)
+// ============================================================
+
+/**
+ * Populates the Portfolio Scenario currency dropdown (inside the
+ * Consolidated Portfolio VaR card) from the 'all' cumulative period, which
+ * by construction already contains every currency in the full portfolio
+ * (cash + every forward, across every bucket) — no deduplication across
+ * multiple periods is needed here, unlike renderSpotCurrencyDropdown above,
+ * since a single period already is the full superset.
+ *
+ * @param {Array} periods — data.cumulative_periods
+ */
+function renderPortfolioCurrencyDropdown(periods) {
+    const sel = document.getElementById('portfolioSpotCcySelect');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">— Select —</option>';
+
+    const allPeriod = (periods || []).find(p => p.key === 'all');
+    if (!allPeriod) return;
+
+    allPeriod.currencies.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = opt.textContent = c.currency;
+        sel.appendChild(opt);
+    });
+
+    // Default to the first (largest, since currencies arrive pre-sorted by
+    // |net_notional_base| descending from dashboard_engine.py) currency.
+    const first = allPeriod.currencies[0];
+    if (first) { sel.value = first.currency; portfolioActiveSpotCcy = first.currency; }
+}
+
+/** Refreshes the % labels displayed next to the Portfolio Scenario's two sliders. */
+function updatePortfolioSliderDisplays() {
+    document.getElementById('portfolioSpotValue').textContent = _formatSliderPercent(portfolioDeltaSpot);
+    document.getElementById('portfolioVolValue').textContent  = _formatSliderPercent(portfolioDeltaVol);
+}
+
+/**
+ * Recomputes the "Stressed Portfolio VaR" figure in the Consolidated
+ * Portfolio VaR card from the current Portfolio Scenario slider deltas.
+ *
+ * === WHY THIS REUSES THE 'all' PERIOD'S DATA — NO NEW BACKEND MATH ===
+ *
+ * exposure_engine.py guarantees that cumulative_vars['all']['period_var']
+ * equals consolidated_var['total_var'] exactly: both are computed by the
+ * identical min(Tᵢ,Tⱼ) covariance method over the identical full position
+ * list (see exposure_engine.py's CUMULATIVE_PERIOD_DEFINITIONS docstring
+ * for the guarantee, and dashboard_engine.py's module docstring). This
+ * means the 'all' period's per-currency vol_term/mu_term/cfar values —
+ * already sent to the frontend for the Risk Dashboard's "All" filter
+ * option — are equally valid inputs for stressing the Consolidated VaR
+ * figure. No new Python computation was required to add this feature:
+ * this function reuses applySimulation() completely unchanged, just with
+ * a second, independent set of slider state (portfolioDeltaSpot /
+ * portfolioDeltaVol / portfolioActiveSpotCcy) targeting the 'all' period.
+ *
+ * === WHY THIS IS AN APPROXIMATION (identical caveat to the Period VaR strip) ===
+ *
+ * Each currency's Component CFaR is scaled independently and summed —
+ * cross-currency correlations are NOT recomputed when a slider moves
+ * (that would require the full n×n covariance matrix server-side). At
+ * Δ=0 the sum is exact and equals the Consolidated Portfolio VaR figure
+ * shown statically above this panel (Euler decomposition theorem). At
+ * Δ≠0 the sum is a conservative approximation (slightly overstates risk).
+ * This is the exact same method and the exact same caveat as
+ * updateChartSimulation()'s Period VaR strip update — just a second,
+ * independent instance of it targeting this card instead.
+ */
+function updatePortfolioSimulation() {
+    const elVar = document.getElementById('portfolioStressedVaR');
+    if (!elVar || !dashboardData) return;
+
+    const allPeriod = dashboardData.cumulative_periods.find(p => p.key === 'all');
+    if (!allPeriod) { elVar.textContent = '—'; return; }
+
+    const simulated = allPeriod.currencies.map(c =>
+        applySimulation(c, portfolioDeltaSpot, portfolioDeltaVol, portfolioActiveSpotCcy)
+    );
+    const stressedTotal = simulated.reduce((acc, s) => acc + s.cfar, 0);
+
+    elVar.textContent = `${dashboardData.base_ccy} ${fmtNum(stressedTotal)}`;
+}
+
+function handlePortfolioSpotCcyChange() {
+    portfolioActiveSpotCcy = document.getElementById('portfolioSpotCcySelect').value || null;
+    updatePortfolioSimulation();
+}
+
+function handlePortfolioSpotSlider() {
+    portfolioDeltaSpot = parseInt(document.getElementById('portfolioSpotSlider').value, 10) / 1000;
+    updatePortfolioSliderDisplays();
+    updatePortfolioSimulation();
+}
+
+function handlePortfolioVolSlider() {
+    portfolioDeltaVol = parseInt(document.getElementById('portfolioVolSlider').value, 10) / 1000;
+    updatePortfolioSliderDisplays();
+    updatePortfolioSimulation();
 }
 
 
@@ -899,7 +1479,7 @@ function fmtShort(v) {
 
 /**
  * isNarrowChart(chart) — true when the Net Exposure chart's current
- * rendered width is too narrow for the inside-bar Component CFaR labels
+ * rendered width is too narrow for the inside-bar net notional labels
  * to comfortably show their full "SGD 21,584"-style text without
  * overflowing past their own bar's column.
  *
