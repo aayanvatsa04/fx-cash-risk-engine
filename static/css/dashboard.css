@@ -612,6 +612,15 @@ textarea {
   /* Matches the same bar colours used for the notional chart above and
      for the Hedge Effectiveness table's direction badges, so a currency
      reads as the same colour everywhere on the page — not a new palette. */
+  /* V3.7: this transition is now functionally meaningful. Previously,
+     dashboard.js rebuilt this section's entire innerHTML on every slider
+     tick, destroying and recreating this element every time — a CSS
+     transition only animates an EXISTING element's property change, so it
+     had nothing to animate from and never actually fired. As of V3.7,
+     updateCfarBarsInPlace() mutates this element's width directly instead
+     of rebuilding it, so width changes now smoothly interpolate via this
+     rule rather than snapping instantly. See dashboard.js's
+     updateCfarBarsInPlace() docstring for the full rationale. */
   transition:    width 0.4s ease;
 }
 .cfar-bar-fill.long  { background: rgba(74, 222, 128, 0.70); }   /* green */

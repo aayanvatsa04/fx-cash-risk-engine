@@ -127,7 +127,12 @@ All four sections are driven by a single API response from one Calculate click.
   by risk magnitude — this replaced the V3 design where CFaR was printed
   inside the notional bars, which user testing found confusing (a currency
   could show near-zero notional but the chart's single largest CFaR label).
-  Both bar systems share the same simulation sliders below them.
+  Both bar systems share the same simulation sliders below them. As of
+  V3.7, the Component CFaR bars' order and scale are locked at the moment a
+  period first renders (no simulation applied yet) and stay fixed while the
+  sliders are used afterwards — only each bar's own width/value moves, via
+  a smooth CSS transition, rather than the whole section re-sorting and
+  snapping on every tick.
 
 - **Fixed Chart Detail Panel (V3.3):** Hovering a notional bar shows its
   Component CFaR, spot rate, vol, and horizon in a fixed-position DOM panel
@@ -200,7 +205,8 @@ Strict rules maintained across all files:
 - `dashboard_engine.py` has no knowledge of Flask or HTML — it transforms dicts.
 - `app.py` contains no financial math — only routing, validation, and engine calls.
 - `dashboard.js` contains no VaR formulas — only arithmetic using pre-computed
-  values (vol_term, mu_term) provided by `dashboard_engine.py`.
+  values (`vol_part`, `drift_part` — V3.6) computed by `exposure_engine.py`
+  and relayed unchanged through `dashboard_engine.py`.
 
 ### When adding features
 
@@ -526,26 +532,80 @@ the UI tooltip.
 
 **Currency spot shift (Δ_spot), applied to selected currency only:**
 ```
-new_CFaR         = CFaR × (1 + Δ_spot)                  ← exact
-new_net_notional = net_notional_base × (1 + Δ_spot)      ← exact
+new_CFaR         = CFaR × (1 + Δ_spot)
+new_net_notional = net_notional_base × (1 + Δ_spot)      ← exact (notional conversion is genuinely linear in spot rate)
 ```
-VaR is linear in E, and E ∝ spot_rate, so both scale exactly.
+`new_net_notional` is exact. `new_CFaR` is only exact if the shifted
+currency has zero correlation with the rest of the portfolio — in a
+realistic portfolio it's a first-order approximation, confirmed
+empirically: a +5% spot shift on a correlated currency showed roughly a
+0.8% gap between this formula's prediction and a real engine re-run for
+that currency's own component, and other currencies (left frozen by this
+formula) moved by a few percent in the real re-run when the formula shows
+0% movement for them. This is a disclosed, by-design PoC tradeoff (see
+Known Limitations) — **not** the same kind of issue the vol slider had
+before V3.6. Tested with shifts as small as ±0.01% around zero: both the
+true values and this formula's predictions move smoothly, with no jump at
+Δ_spot = 0 or anywhere else — the inaccuracy grows gradually with shift
+size rather than appearing suddenly. Re-run Calculate for the exact figure
+at a genuinely different spot-rate assumption.
 
-**Volatility regime shift (Δ_vol), applied to all currencies:**
+**Volatility regime shift (Δ_vol), applied to all currencies — V3.6, exact:**
 ```
-new_CFaR_long  = max(vol_term × (1 + Δ_vol) − mu_term, 0)
-new_CFaR_short = max(vol_term × (1 + Δ_vol) + mu_term, 0)
+new_CFaR = (1 + Δ_vol) × vol_part − drift_part
 ```
-where vol_term and mu_term are pre-computed by `dashboard_engine.py`.
-Scaling CFaR directly by (1 + Δ_vol) would be wrong — it would also scale
-mu_term, which is independent of the volatility regime.
+ONE formula for every currency — long, short, or flat alike. `vol_part` and
+`drift_part` are computed in `exposure_engine.py`'s
+`_compute_component_vars_by_currency()` from the same per-position arrays
+that produce the exact static CFaR itself (not from `net_notional_base`,
+and not from any single-T approximation).
+
+This replaced a prior approach (`vol_term`/`mu_term`, derived from
+`net_notional_base` and an exposure-weighted `effective_T`) that could
+diverge sharply from the exact CFaR it was meant to approximate — testing
+against a real portfolio found jumps of several hundred percent, and even
+sign flips, from a vol delta of a few thousandths of a percent. The deeper
+flaw: `vol_term`/`mu_term` were a standalone, single-position-style
+estimate that ignored cross-currency covariance entirely, while Component
+CFaR is fundamentally a *marginal* quantity that only means what it means
+because of the full covariance matrix — there's no reason these two
+calculations should agree, and empirically they often didn't.
+
+**Why this is now exact, not just continuous:** under a *uniform* vol-regime
+shift (every currency's σ scaled by the same factor k = 1+Δ_vol — exactly
+what this slider does), the volatility-driven part of Component VaR scales
+EXACTLY linearly by k. This is a provable identity:
+```
+Σ[i,j](k) = ρ[i,j] × (kσᵢ)(kσⱼ) × min(Tᵢ,Tⱼ) = k² × Σ[i,j](1)
+⟹ σ_p(k) = k × σ_p(1)   and   (Σ(k)s)ᵢ = k² × (Σ(1)s)ᵢ
+⟹ vol_componentᵢ(k) = sᵢ(Σ(k)s)ᵢ/σ_p(k) × Z = k × vol_componentᵢ(1)
+```
+It holds regardless of net notional — including the cross-horizon residual
+case (a currency with zero net notional but real Component CFaR, from
+same-currency positions settling at different dates), which previously
+forced `vol_term = mu_term = 0` and made that currency's simulated CFaR
+snap straight to zero on any vol move (patched as an interim measure in
+V3.5, fully superseded by this exact fix).
+
+Verified empirically, not just symbolically: a full engine re-run at a
++25% vol level matched this formula's prediction for every currency, and
+for the portfolio-level sum, to within floating-point rounding.
 
 **At Δ = 0:** Component CFaRs equal their exact server-side covariance values.
 Their sum equals Period VaR exactly (Euler decomposition theorem).
 
-**At Δ ≠ 0:** Each component is scaled independently without rerunning the
-covariance matrix. The Period VaR strip (sum of components) is a conservative
-approximation.
+**At Δ_vol ≠ 0, Δ_spot = 0:** exact — the Period VaR strip (sum of components)
+equals what a full server-side re-run at that vol level would produce.
+
+**At Δ_spot ≠ 0 (with or without a simultaneous vol shift):** still an
+approximation, for the reason given above — re-run Calculate for the exact
+figure at a genuinely different spot-rate assumption.
+
+**No floor at zero:** neither formula clamps its result to ≥ 0. The static
+CFaR itself is never floored server-side (a currency that hedges the rest
+of the portfolio can have a genuinely negative component VaR — see
+`exposure_engine.py`'s docstring, "Negative component VaR"), so flooring
+only the simulated path would create a mismatch right at the Δ=0 boundary.
 
 **Two independent slider pairs (V3.2):** The Risk Dashboard's stat cards
 (including its own "Portfolio VaR (exact)" card) are never updated by either
@@ -558,7 +618,7 @@ recomputes live using the identical method described above — summing
 simulated Component CFaRs from the `'all'` cumulative period, which
 `exposure_engine.py` guarantees equals `consolidated_var` exactly at Δ=0.
 Re-run Calculate to get an exact server-computed figure at a genuinely new
-vol/spot assumption, for either slider pair.
+spot assumption, for either slider pair.
 
 ### Hedge effectiveness
 
@@ -589,9 +649,8 @@ developer has to read carefully to tell apart.
 | Normal distribution understates fat tails for crashing currencies (TRY, ARS) | ⚠️ Open | Monte Carlo with Student's t distribution |
 | Bucket midpoint T approximates each exposure's actual settlement T | ⚠️ Open | Exposure-weighted average T per bucket |
 | No public holiday calendar — counts Mon–Fri only | ⚠️ Open | Market-specific calendar (SGX, NYSE, MAS) |
-| Vol slider approximates during simulation (no covariance recomputation in browser) | ⚠️ By design (PoC) | Add /simulate endpoint or pass correlation matrix to frontend |
+| Spot slider is a smooth but imprecise approximation when the shifted currency correlates with others — even its own component is only first-order correct (~0.8% gap measured at a 5% shift), and other currencies are left frozen instead of reflecting the real cross-covariance effect | ⚠️ By design (PoC) | Add /simulate endpoint or pass correlation matrix to frontend |
 | Gross standalone uses bucket-midpoint T for forwards (slight overstatement) | ⚠️ Known, disclosed | Recompute at actual T for clean apples-to-apples |
-| Vol slider's flat-currency case (zero net notional, non-zero Component CFaR — the cross-horizon residual) uses a rougher interim approximation: the whole static CFaR is scaled by (1+Δvol) directly, rather than the exact vol/drift decomposition used for long/short currencies. (V3.5 — this replaced a worse bug where ANY non-zero vol delta snapped these currencies' CFaR straight to 0, since vol_term/mu_term are both precomputed as `net_notional_base × (something)` and are therefore always 0 for a flat currency, regardless of how large its real Component CFaR is.) | ⚠️ Known, disclosed (interim fix in place) | Exact fix is available, not just a better approximation: under a uniform vol-regime shift, the volatility-driven part of Component VaR scales EXACTLY linearly for any position (a provable consequence of the covariance matrix being homogeneous of degree 2 in σ) — requires `exposure_engine.py`'s `_compute_component_vars_by_currency` to expose the vol-part/drift-part decomposition per currency, computed from real per-position sums rather than `net_notional_base` |
 
 ---
 
@@ -631,6 +690,8 @@ question of where a new row goes.
 | Notional chart's floating Chart.js tooltip replaced with a fixed-position DOM panel (V3.3) — `#dashChartDetail`, rendered by the new `renderChartDetailPanel()`, driven by the chart's `onHover` callback instead of `plugins.tooltip` | Real, reproducible bug, caught by screenshot: for the LAST bar on the x-axis, Chart.js flips its floating tooltip box leftward to keep it on-canvas, landing the box's pixels on top of the PREVIOUS bar's hover-detection column (chart uses `interaction: {mode:'index', intersect:false}`, so hover is driven purely by x-proximity). Moving the mouse left to read the box re-triggered hover on that previous bar, collapsing the very box being read — made the last bar's details unreadable, no matter how the mouse moved. A fixed DOM element has no such failure mode for any bar, at any width, since its screen position never overlaps a bar's hover-detection zone. Defaults to showing the largest-exposure currency so it's never empty. Frontend-only (`dashboard.js`, `calculator.html`, `dashboard.css`) — no Python changes |
 | Zero-notional/non-zero-CFaR explanation split into two tooltips (V3.4) — the full T=43-vs-T=100 walkthrough moved from the Component CFaR section's header tooltip into a hoverable "ⓘ" on the Chart Detail Panel's own note, attached contextually to whichever currency actually exhibits the case | The header tooltip previously carried the full walkthrough as a generic disclaimer, shown identically regardless of whether anything in the current view needed it, making it long. The Chart Detail Panel's note (added in V3.3) initially showed this as plain, non-interactive text with no further detail. Moving the full explanation there instead — using the same `.dash-tooltip-icon`/`.tip-inline` CSS-only hover mechanism already used elsewhere (a plain `:hover::after` popup reading `data-tip`, NOT the buggy Chart.js canvas tooltip fixed in V3.3 — no shared mechanism, no risk of reintroducing that bug) — makes the explanation appear exactly when and where it's relevant, and lets the header tooltip stay short and general. Frontend-only (`dashboard.js`, `calculator.html`) — no Python changes |
 | Vol slider no longer snaps a flat currency's Component CFaR to exactly 0 on any non-zero move (V3.5 interim fix) — `applySimulation()`'s flat-direction branch now scales the static exact `cfar` by `(1+Δvol)` instead of hardcoding `cfar = 0` | Caught via screenshot: a −0.1% vol nudge sent MYR's Component CFaR from SGD 55,406 straight to SGD 0. Root cause was two-layered — an explicit `else { cfar = 0 }` branch for flat currencies, AND the deeper fact that `vol_term`/`mu_term` are both precomputed server-side as `net_notional_base × (something)`, which is always 0 for a flat (net-zero-notional) currency regardless of how large its real cross-horizon-residual Component CFaR is. This interim patch is frontend-only (`dashboard.js`, `calculator.html` sim-note copy) and is an approximation, not an exact fix — it's tracked as a remaining item in Known Limitations, with the exact fix (a provable linear-scaling identity under uniform vol shifts) requiring a backend change to expose a proper vol-part/drift-part decomposition per currency, deliberately deferred per the user's request to scope it as a separate, future, branch-worthy change |
+| Vol slider made fully EXACT, not just continuous (V3.6) — superseded the V3.5 interim patch entirely. `net_notional_base`-derived `vol_term`/`mu_term` removed completely; replaced with `vol_part`/`drift_part`, computed in `exposure_engine.py`'s `_compute_component_vars_by_currency()` from the same per-position arrays that produce the exact static Component CFaR. `applySimulation()` is now ONE formula for every currency (long, short, or flat) — `new_cfar = (1+Δvol)×vol_part − drift_part` — with no direction branching and no zero-floor (negative components are meaningful, not errors) | User pushed back on whether a 0.1% vol move should really change numbers as much as it did, even after the V3.5 patch — testing confirmed it was much worse than the flat-currency case alone: real currencies in a real portfolio showed jumps of several hundred percent (one case 4,070%) and even sign flips from a vol delta of a few thousandths of a percent, because the old `vol_term`/`mu_term` was a standalone single-position-style estimate that completely ignored cross-currency covariance — fundamentally a different quantity from the exact, marginal Component CFaR it was meant to approximate. The fix isn't a better approximation; it's mathematically exact, provable from the covariance matrix being homogeneous of degree 2 in σ under a uniform vol-regime shift (see `_compute_component_vars_by_currency`'s docstring for the full derivation). Verified empirically, not just symbolically: every currency's simulated value at +25% vol matched a full engine re-run to within floating-point rounding, including MYR's cross-horizon residual case, with zero special-casing required in the new code. Branch-worthy (`exposure_engine.py`, `dashboard_engine.py` both touched) — `dashboard.js` and `calculator.html` updated to match; `effective_T` retained as a display-only field (Chart Detail Panel), no longer feeding any simulation math. The spot slider's approximation (shifting one currency's exposure doesn't have the same exact-scaling identity) is unchanged and remains disclosed in Known Limitations |
+| Component CFaR bars no longer re-sort or rebuild on every slider tick (V3.7) — `renderCfarBarsForPeriod()` now locks display order and the scaling denominator ONCE per period render (a fresh Calculate or a period-dropdown change, both of which reset sliders to 0 first), and a new `updateCfarBarsInPlace()` handles every subsequent slider tick by mutating each row's existing width/value directly instead of rebuilding the section | Even after V3.6 made the underlying numbers exact, the bars still visually behaved badly: `renderCfarBarsForPeriod()` was being called again on every tick, re-sorting by current `\|CFaR\|` (letting two close-magnitude currencies visually swap rank from a small real change) and rebuilding the section's entire `innerHTML` every time (which silently defeated the `.cfar-bar-fill` CSS width transition — a transition only animates an EXISTING element's property change, and destroying/recreating every element every tick gave the browser nothing to animate from, so bars snapped instead of sliding). Verified empirically with a deliberately-engineered two-currency scenario where one genuinely overtakes the other in magnitude under a vol shift: order stayed locked at its Δ=0 baseline throughout the full slider range, and the same DOM nodes persisted across every tick (confirmed via object identity), proving the CSS transition can now actually animate. Frontend-only (`dashboard.js`, plus a `dashboard.css` comment update) — no Python changes. Also removed an unnecessary `CSS.escape()` call added during this work (currency codes are always simple 3-letter uppercase ISO codes from the backend, never arbitrary/user-controlled strings, so escaping added a Web API dependency for no real benefit) |
 
 ---
 

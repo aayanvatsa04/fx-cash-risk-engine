@@ -27,17 +27,16 @@ This module:
 
 The client-side simulation sliders update CFaR values live as the user drags.
 To avoid needing the VaR formula in JavaScript (which would duplicate math
-that only belongs in Python), this module pre-computes the two components of
-each position's CFaR:
+that only belongs in Python), the actual VaR engine (exposure_engine.py)
+pre-computes the two components of each currency's Component CFaR:
 
-    CFaR = vol_term ± mu_term
+    component_var = vol_part − drift_part
     where:
-        vol_term = |net_notional_base| × Z × σ_annual × √(T/252)
-        mu_term  = |net_notional_base| × μ_daily × T    (SIGNED — can be ±)
+        vol_part   = Σ_{positions of this currency} (sᵢ × (Σs)ᵢ / σ_p) × Z
+        drift_part = Σ_{positions of this currency} sᵢ × μᵢ_daily × Tᵢ  (SIGNED)
 
-The JavaScript then only needs:
-    new_cfar_long  = vol_term * (1 + Δ_vol) - mu_term   [long position]
-    new_cfar_short = vol_term * (1 + Δ_vol) + mu_term   [short position]
+The JavaScript then only needs ONE formula, for ANY currency:
+    new_cfar = (1 + Δ_vol) × vol_part − drift_part
 
 For a spot rate shift (selected currency only):
     new_cfar = cfar * (1 + Δ_spot)     ← exact, because VaR ∝ E ∝ spot_rate
@@ -45,10 +44,56 @@ For a spot rate shift (selected currency only):
 This keeps all VaR mathematics in Python and keeps the JavaScript as a pure
 presentation layer — consistent with the project's separation-of-concerns principle.
 
-For the cumulative period view, vol_term and mu_term are computed using an
-exposure-weighted effective T per currency (see _process_cumulative_periods).
-This is an approximation for simulation purposes — the actual period_var uses
-exact per-position T values in the full covariance matrix.
+=== V3.6 — vol_term/mu_term REMOVED (replaced by exact vol_part/drift_part) ===
+
+Prior to V3.6, THIS module computed vol_term/mu_term directly, from a single
+aggregate `net_notional_base` per currency:
+    vol_term = |net_notional_base| × Z × σ_annual × √(effective_T/252)
+    mu_term  = |net_notional_base| × μ_daily × effective_T
+
+Two problems with this, both confirmed empirically before this rewrite:
+
+  1. It is a fundamentally different, much cruder calculation than the
+     exact component_var it was meant to approximate — a standalone
+     single-position estimate that completely ignores cross-currency
+     covariance (the entire reason Component CFaR exists in the first
+     place). Testing against a real portfolio showed jumps of several
+     hundred percent — even a sign flip (a currency that genuinely
+     reduces portfolio risk appearing to increase it) — from a vol slider
+     move of a few thousandths of a percent, because vol_term − mu_term
+     simply did not equal component_var even in the Δ_vol → 0 limit.
+  2. For a currency with zero NET notional but non-zero component_var
+     (the cross-horizon residual case — see exposure_engine.py's
+     calculate_cumulative_period_vars docstring), vol_term and mu_term
+     were BOTH always exactly 0 (since they're built from
+     net_notional_base, which is 0 by definition for this case) — so
+     ANY non-zero vol delta snapped that currency's simulated CFaR
+     straight to 0, regardless of how large its real risk was.
+
+V3.6 replaces both fields with vol_part/drift_part, computed in
+exposure_engine.py's _compute_component_vars_by_currency() directly from
+the same per-position vol_component/drift_contribution arrays that produce
+the exact component_var in the first place — not from net_notional_base at
+all. By construction, vol_part − drift_part = component_var EXACTLY, so the
+slider is continuous with the static baseline at Δ_vol = 0 by mathematical
+necessity, not by coincidence. And under a uniform vol-regime shift (which
+is exactly what this slider does — see that docstring for the full proof),
+vol_part scales EXACTLY linearly — so the simulated value is no longer an
+approximation at all for a pure vol shift, for any currency, long, short,
+or flat.
+
+This also corrects an architectural inconsistency: this module's own stated
+purpose (above) is "transform... without performing any financial
+mathematics itself" — yet the old vol_term/mu_term formula (Z × σ × √(T/252))
+WAS financial mathematics, computed in the transformation layer rather than
+the VaR engine layer. Moving this computation into exposure_engine.py (where
+vol_component/drift_contribution were already being computed anyway, for
+component_var) fixes that inconsistency as a side effect of fixing the bug.
+
+For the cumulative period view, effective_T is still computed (and is still
+useful as a DISPLAY field — see exposure_engine.py's
+calculate_cumulative_period_vars docstring) but, as of V3.6, no longer feeds
+any simulation math at all.
 
 === CUMULATIVE PERIOD VIEW (V3) ===
 
@@ -57,7 +102,9 @@ frontend receives a 'cumulative_periods' list built by _process_cumulative_perio
 Each period dict contains:
     - period_var: the exact consolidated VaR for positions in this window
     - currencies: list of per-currency dicts with net notional and component_cfar
-    - vol_term / mu_term per currency: pre-computed for simulation sliders
+    - vol_part / drift_part per currency: pre-computed (in exposure_engine.py)
+      for the simulation sliders — V3.6: exact, not an approximation, for a
+      pure vol-regime shift (see above)
 
 The 'cfar' field in each period currency dict is the component VaR (risk
 attribution), NOT a simple-sum bucket VaR. Component VaRs across all currencies
@@ -241,12 +288,14 @@ def prepare_dashboard_data(var_result: dict) -> dict:
     # -----------------------------------------------------------------------
     # Step 2: Process cumulative period data (V3).
     # Transforms var_result['cumulative_vars'] into the chart-ready period list
-    # for the bar chart dropdown filter. Pre-computes vol_term / mu_term per
-    # currency per period for the scenario simulation sliders.
+    # for the bar chart dropdown filter. Relays the EXACT vol_part / drift_part
+    # per currency per period (V3.6 — computed in exposure_engine.py, not here)
+    # for the scenario simulation sliders. No z_score needed here any more —
+    # see _process_cumulative_periods' docstring, "V3.6: NO MORE z_score
+    # PARAMETER".
     # -----------------------------------------------------------------------
     cumulative_periods = _process_cumulative_periods(
         var_result = var_result,
-        z_score    = z_score,
     )
 
     # -----------------------------------------------------------------------
@@ -360,7 +409,7 @@ def prepare_dashboard_data(var_result: dict) -> dict:
 # INTERNAL HELPERS
 # =============================================================================
 
-def _process_cumulative_periods(var_result: dict, z_score: float) -> list[dict]:
+def _process_cumulative_periods(var_result: dict) -> list[dict]:
     """
     Transforms var_result['cumulative_vars'] (from exposure_engine.py) into
     the list of chart-ready period dicts consumed by dashboard.js.
@@ -372,29 +421,35 @@ def _process_cumulative_periods(var_result: dict, z_score: float) -> list[dict]:
 
     For each period in cumulative_vars:
         1. For each currency in period['currencies']:
-           a. Compute vol_term and mu_term using effective_T (exposure-weighted
-              average T from the engine — see calculate_cumulative_period_vars).
-              These allow the vol slider to apply without knowing the VaR formula:
-                  new_cfar = max(vol_term * (1 + Δ_vol) ∓ mu_term, 0)
+           a. Pass through vol_part and drift_part as-is — these are already
+              the EXACT decomposition computed by exposure_engine.py's
+              _compute_component_vars_by_currency() (V3.6). This function
+              performs NO further math on them; it is a pure passthrough,
+              consistent with this module's "no financial mathematics"
+              principle (see module docstring, "V3.6 — vol_term/mu_term
+              REMOVED", for why the PREVIOUS version of this function
+              violated that principle and how this version fixes it).
            b. Derive net_notional_foreign from base / spot_rate, preserving sign.
            c. Map component_var → cfar (named 'cfar' for simulation compatibility
               with applySimulation() in dashboard.js, which reads ccy.cfar).
         2. Sort currencies by |net_notional_base| descending (largest bars first).
         3. Build the period output dict.
 
-    === SIMULATION APPROXIMATION ===
+    === V3.6: NO MORE z_score PARAMETER ===
 
-    vol_term and mu_term use the exposure-weighted effective_T — an approximation
-    for currencies with multiple positions at different horizons within the same
-    period. The actual period_var uses exact per-position T via the full covariance
-    matrix. The approximation only affects the slider simulation (live preview).
-    Period VaR shown in the info strip is always the pre-computed exact value.
+    Prior to V3.6, this function took a z_score argument and used it (along
+    with effective_T) to compute vol_term/mu_term itself — see module
+    docstring for why that was both mathematically flawed (vol_term/mu_term
+    could diverge sharply from the exact component_var they approximated)
+    and an architectural inconsistency (real VaR math living in the
+    transformation layer). As of V3.6, vol_part/drift_part arrive already
+    computed and exact from exposure_engine.py, so this function has no
+    further use for z_score — it's been removed from the signature
+    entirely rather than left as a silently-unused parameter.
 
     Args:
         var_result: Full output dict from calculate_fx_var(). Must contain
                     'cumulative_vars' as added by V3.
-        z_score:    norm.ppf(confidence) — must be the SAME value used when
-                    computing the period VaRs, to keep vol_term consistent.
 
     Returns:
         List of period dicts ordered ['1m', '3m', '6m', '12m', 'all'].
@@ -419,9 +474,14 @@ def _process_cumulative_periods(var_result: dict, z_score: float) -> list[dict]:
             'annualised_vol':       float,   — σ_annual
             'annualised_vol_pct':   float,   — for display as "4.56%"
             'daily_mean':           float,   — μ_daily
-            'effective_T':          float,   — exposure-weighted avg T
-            'vol_term':             float,   — pre-computed for vol slider
-            'mu_term':              float,   — pre-computed for vol slider (signed)
+            'effective_T':          float,   — exposure-weighted avg T (DISPLAY
+                                                ONLY as of V3.6 — see module docstring)
+            'vol_part':             float,   — V3.6: EXACT vol-driven part of cfar,
+                                                for the vol slider. Scales exactly
+                                                linearly under a uniform vol shift.
+            'drift_part':           float,   — V3.6: EXACT drift-driven part of cfar
+                                                (signed). Constant under a vol shift.
+                                                cfar = vol_part - drift_part, exactly.
         }
     """
     # Canonical order for period output — must match CUMULATIVE_PERIOD_DEFINITIONS
@@ -449,24 +509,16 @@ def _process_cumulative_periods(var_result: dict, z_score: float) -> list[dict]:
             component_cfar    = float(cdata.get('component_var',      0.0))
             spot_rate         = float(cdata.get('spot_rate',          1.0))
 
-            # --- Pre-compute simulation vol_term and mu_term ---
-            # Uses exposure-weighted effective_T as the representative horizon.
-            # This is an approximation — the exact period VaR uses per-position T.
-            # See module docstring and _compute_component_vars_by_currency for details.
-            #
-            # σ_T = σ_annual × √(effective_T / 252)   [horizon-scaled volatility]
-            sigma_T  = ann_vol * math.sqrt(effective_T / 252.0) if effective_T > 0 else 0.0
-            #
-            # vol_term = |net_notional_base| × Z × σ_T   [pure vol contribution to CFaR]
-            # Scaled by (1 + Δ_vol) in JS simulation, with mu_term held constant.
-            vol_term = net_notional_base * z_score * sigma_T
-            #
-            # mu_term = |net_notional_base| × μ_daily × effective_T  (SIGNED)
-            # Positive μ (FCY appreciating) reduces CFaR for long positions.
-            # For short positions it increases CFaR. JavaScript uses:
-            #   new_cfar_long  = max(vol_term * (1 + Δv) − mu_term, 0)
-            #   new_cfar_short = max(vol_term * (1 + Δv) + mu_term, 0)
-            mu_term  = net_notional_base * daily_mean * effective_T
+            # --- V3.6: vol_part / drift_part pass through unchanged ---
+            # These arrive already exact from exposure_engine.py's
+            # _compute_component_vars_by_currency() — computed from the same
+            # per-position vol_component/drift_contribution arrays that
+            # produce component_cfar itself, NOT from net_notional_base.
+            # No computation happens here; this function only relays them.
+            # See module docstring, "V3.6 — vol_term/mu_term REMOVED", for
+            # the full history and proof of exactness under a uniform vol shift.
+            vol_part   = float(cdata.get('vol_part',   0.0))
+            drift_part = float(cdata.get('drift_part', 0.0))
 
             # --- Net notional in foreign currency ---
             # Derive from base / spot_rate, preserving the direction sign.
@@ -495,10 +547,13 @@ def _process_cumulative_periods(var_result: dict, z_score: float) -> list[dict]:
                 # annualised_vol_pct: for display as "4.56%"
                 'annualised_vol_pct':   round(ann_vol * 100.0,            2),
                 'daily_mean':           round(daily_mean,                 8),
+                # effective_T: DISPLAY ONLY as of V3.6 (Chart Detail Panel's
+                # "Eff. horizon" row) — no longer feeds any simulation math.
                 'effective_T':          round(effective_T,                1),
-                # Simulation components (pre-computed for exact client-side vol slider)
-                'vol_term':             round(vol_term,                   2),
-                'mu_term':              round(mu_term,                    6),
+                # Simulation components (V3.6: EXACT, passed through as-is —
+                # see this function's docstring)
+                'vol_part':             round(vol_part,                   2),
+                'drift_part':           round(drift_part,                 2),
             })
 
         # Sort by absolute net notional descending — largest exposure bars appear first

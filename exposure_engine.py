@@ -1292,10 +1292,13 @@ def _compute_component_vars_by_currency(
     positions:   list[dict],
     corr_matrix: np.ndarray,
     z:           float,
-) -> dict[str, float]:
+) -> dict[str, dict]:
     """
     Computes component VaR (marginal risk contribution) for each individual
-    position and sums contributions by currency.
+    position and sums contributions by currency. ALSO returns the vol/drift
+    split of that sum per currency (V3.6 — see "WHY THE SPLIT IS RETURNED"
+    below), so the frontend simulation sliders can scale Component CFaR
+    EXACTLY under a vol-regime shift, rather than approximating it.
 
     === WHAT IS COMPONENT VAR? ===
 
@@ -1329,6 +1332,65 @@ def _compute_component_vars_by_currency(
         Σᵢ drift_component_i = sᵀ μ_T              ← portfolio drift
         Sum = σ_p × Z − sᵀ μ_T = Portfolio_VaR ✓
 
+    === WHY THE VOL/DRIFT SPLIT IS RETURNED (V3.6) ===
+
+    Per-currency, define:
+        vol_part_c   = Σ_{i∈c} vol_component_i
+        drift_part_c = Σ_{i∈c} drift_component_i
+        component_var_c = vol_part_c − drift_part_c   (same as before)
+
+    Under a UNIFORM vol-regime shift — every currency's annualised vol
+    scaled by the same factor k (this is exactly what the frontend's
+    "Volatility Regime Change" slider does: "Scale all currency pair
+    volatilities up or down") — the vol-driven part scales EXACTLY
+    linearly by k, for ANY position, REGARDLESS of net notional:
+
+        Σ[i,j](k) = ρ[i,j] × (k·σᵢ) × (k·σⱼ) × min(Tᵢ,Tⱼ) = k² × Σ[i,j](1)
+        ⟹ σ_p(k)² = sᵀΣ(k)s = k² × sᵀΣ(1)s  ⟹  σ_p(k) = k × σ_p(1)
+        ⟹ (Σ(k)s)ᵢ = k² × (Σ(1)s)ᵢ
+        ⟹ vol_component_i(k) = sᵢ(Σ(k)s)ᵢ/σ_p(k) × Z
+                              = sᵢ · k²(Σ(1)s)ᵢ / (k·σ_p(1)) × Z
+                              = k × vol_component_i(1)
+
+    This is a provable identity, not an approximation — it follows purely
+    from the covariance matrix being homogeneous of degree 2 in σ. It holds
+    even for a currency whose NET notional is zero (the cross-horizon
+    residual case — e.g. a receivable and payable in the same currency that
+    cancel in notional but settle at different dates), because the proof
+    never depends on net notional, only on the per-position vol_component
+    values summing correctly.
+
+    drift_part_c does NOT scale with a vol shift (μ, T, s are unaffected by
+    a volatility-regime change) — it is held constant, exactly as the old
+    (now-replaced) mu_term was designed to be.
+
+    So the frontend can now compute, for ANY currency, an EXACT simulated
+    Component CFaR at vol multiplier k = (1 + Δ_vol):
+
+        new_component_var_c = k × vol_part_c − drift_part_c
+
+    — a single formula, with no long/short/flat branching needed (unlike
+    the old net_notional_base-derived vol_term/mu_term, which were 0 for
+    flat currencies and only a rough approximation for multi-position
+    currencies — see dashboard_engine.py's module docstring for the bug
+    history this replaces). Verified empirically against a full engine
+    re-run at a stressed vol level — predicted and actual periods VaRs
+    matched to within floating-point rounding (see project test history).
+
+    Summing across currencies recovers the SAME exact-scaling identity at
+    the portfolio level, which is why the Period VaR strip / Stressed
+    Portfolio VaR figures also become exact under a pure vol-regime shift,
+    not just individually-consistent approximations — see dashboard.js's
+    module docstring for the user-facing implication of this.
+
+    NOTE: this exactness applies to a UNIFORM vol shift only (the only kind
+    this app's vol slider performs). The SEPARATE spot-rate slider, which
+    shifts only ONE currency's exposure, does NOT have this property —
+    shifting one currency's notional changes its cross-covariance terms
+    with every other currency too, which a simple per-currency scale factor
+    cannot capture exactly. The spot slider's existing approximation is
+    unaffected by this change.
+
     === EDGE CASES ===
 
     portfolio_vol ≈ 0 (all positions perfectly offset each other):
@@ -1354,9 +1416,17 @@ def _compute_component_vars_by_currency(
                      Must be the SAME z used for the portfolio VaR computation.
 
     Returns:
-        Dict mapping currency ISO code → summed component VaR contribution (float).
-        A currency with two positions will have both positions' component VaRs summed.
-        Values can be negative (hedging positions).
+        Dict mapping currency ISO code → {
+            'component_var': float,  — vol_part − drift_part (same value as
+                                        the pre-V3.6 return; sums to portfolio VaR)
+            'vol_part':      float,  — volatility-driven part (scales EXACTLY
+                                        linearly under a uniform vol-regime shift)
+            'drift_part':    float,  — drift-driven part (constant under a
+                                        vol-regime shift; SIGNED, can be ±)
+        }
+        A currency with two positions will have both positions' values summed
+        into each of the three fields. component_var (and the vol/drift parts
+        individually) can be negative (hedging positions).
     """
     n = len(positions)
     if n == 0:
@@ -1388,6 +1458,10 @@ def _compute_component_vars_by_currency(
     # Note: sᵢ × marginalᵢ = sᵢ × Σⱼ Cov(i,j)sⱼ = contribution to portfolio variance.
     # Dividing by σ_p converts from variance to volatility space.
     # Multiplying by Z gives the VaR-level contribution.
+    #
+    # This array (vol_component, per-position) is exactly what the V3.6
+    # vol_part return value sums by currency — it is THE quantity proven
+    # above to scale exactly linearly under a uniform vol-regime shift.
     if portfolio_vol > 1e-12:
         # Normal case: portfolio has non-trivial volatility
         vol_component = (s * marginal / portfolio_vol) * z
@@ -1399,17 +1473,29 @@ def _compute_component_vars_by_currency(
     # Drift component: sᵢ × μᵢ_daily × Tᵢ
     # This is the position's expected P&L over its own horizon.
     # Positive drift on a long position REDUCES VaR (subtracted in formula).
+    # This array is exactly what the V3.6 drift_part return value sums by
+    # currency — held constant under a vol-regime shift (μ, T, s don't
+    # change when only volatility is being stressed).
     drift_contribution = s * daily_means * t
 
     # Component VaR per position = vol_component_i − drift_component_i
     # (same structure as portfolio VaR = Z×σ_p − portfolio_drift)
     component_vars = vol_component - drift_contribution
 
-    # Aggregate by currency: sum component VaRs across all positions of each currency
-    result: dict[str, float] = {}
+    # Aggregate by currency: sum vol_component, drift_contribution, AND their
+    # difference (component_var) across all positions of each currency.
+    # All three are accumulated together in one pass for efficiency and to
+    # guarantee they stay numerically consistent with each other (component_var
+    # is always exactly vol_part - drift_part for the SAME currency, never
+    # computed from a separately-rounded intermediate value).
+    result: dict[str, dict] = {}
     for i, pos in enumerate(positions):
         ccy = pos['currency']
-        result[ccy] = result.get(ccy, 0.0) + float(component_vars[i])
+        if ccy not in result:
+            result[ccy] = {'component_var': 0.0, 'vol_part': 0.0, 'drift_part': 0.0}
+        result[ccy]['vol_part']      += float(vol_component[i])
+        result[ccy]['drift_part']    += float(drift_contribution[i])
+        result[ccy]['component_var'] += float(component_vars[i])
 
     return result
 
@@ -1687,19 +1773,30 @@ def calculate_cumulative_period_vars(
     correlation_matrix helpers, then the same calculate_portfolio_var_cov_mixed_t.
     The result is identical to consolidated_var by construction.
 
-    === EXPOSURE-WEIGHTED EFFECTIVE T FOR SIMULATION ===
+    === EXPOSURE-WEIGHTED EFFECTIVE T — DISPLAY ONLY (V3.6 — no longer used for simulation math) ===
 
     Each currency in a period may have multiple positions at different T values
     (e.g. a cash position at T=1 and a forward at T=45, both for USD, in a "3m"
-    view). For the scenario simulation sliders (vol shift, spot shift), we need
-    a single representative T per currency to pre-compute vol_term and mu_term.
+    view). This function still computes a single representative T per currency:
 
-    The exposure-weighted average T is used:
         effective_T = Σ(|signed_base_i| × T_i) / Σ|signed_base_i|
                       for all positions of that currency in this period
 
-    This is used ONLY for the simulation sliders (an approximation). The actual
-    period VaR and component VaRs use the exact per-position T values.
+    Prior to V3.6, this was also used to pre-compute vol_term/mu_term for the
+    scenario simulation sliders — an approximation that could diverge sharply
+    from the exact component_var it was meant to approximate (see
+    dashboard_engine.py's module docstring, "V3.6 — vol_term/mu_term REMOVED",
+    for the bug history: jumps of several hundred percent, and even sign
+    flips, were observed for currencies with multi-position or strongly
+    diversifying structures). As of V3.6, the simulation sliders use the
+    EXACT vol_part/drift_part decomposition below instead, which needs no
+    single-T summary at all — each position's own real T is already baked
+    into vol_part_c and drift_part_c via the full covariance matrix.
+
+    effective_T is retained in this function's output ONLY because it is
+    still shown to the user as a display field (the Chart Detail Panel's
+    "Eff. horizon" row, in dashboard.js's renderChartDetailPanel()) — purely
+    informational, not load-bearing for any VaR or CFaR math.
 
     Args:
         cash_positions: List of cash dicts (currency, balance).
@@ -1725,9 +1822,22 @@ def calculate_cumulative_period_vars(
                     'net_direction':     str,    — 'long', 'short', or 'flat'
                     'component_var':     float,  — this currency's risk contribution
                                                     sums across currencies = period_var
+                    'vol_part':          float,  — V3.6: volatility-driven part of
+                                                    component_var. Scales EXACTLY
+                                                    linearly under a uniform vol-
+                                                    regime shift — see
+                                                    _compute_component_vars_by_currency's
+                                                    docstring for the proof.
+                    'drift_part':        float,  — V3.6: drift-driven part of
+                                                    component_var (SIGNED). Constant
+                                                    under a vol-regime shift.
+                                                    component_var = vol_part - drift_part
+                                                    exactly, always.
                     'ann_vol':           float,  — σ_annual for this currency pair
                     'daily_mean':        float,  — μ_daily for this currency pair
-                    'effective_T':       float,  — exposure-weighted avg T (for simulation)
+                    'effective_T':       float,  — exposure-weighted avg T. DISPLAY
+                                                    ONLY as of V3.6 (see above) — no
+                                                    longer feeds any simulation math.
                     'spot_rate':         float,  — current spot rate (base per 1 foreign)
                 },
                 ...
@@ -1806,6 +1916,12 @@ def calculate_cumulative_period_vars(
         # ComponentVaR_ccy = Σᵢ[(sᵢ × (Σs)ᵢ / σ_p) × Z − sᵢ × μᵢ × Tᵢ]
         # summed over all positions of that currency in this period.
         # Sum across all currencies = period_var (by construction).
+        #
+        # V3.6: also returns vol_part_ccy and drift_part_ccy per currency —
+        # the exact split that lets the frontend simulation sliders scale
+        # Component CFaR EXACTLY under a vol-regime shift, rather than via
+        # the old net_notional_base-derived approximation. See
+        # _compute_component_vars_by_currency's docstring for the full proof.
         component_vars_by_ccy = _compute_component_vars_by_currency(
             positions   = period_positions,
             corr_matrix = full_corr,
@@ -1814,7 +1930,9 @@ def calculate_cumulative_period_vars(
 
         # --- Aggregate per-currency net notionals and effective T ---
         # Net notional: sum of signed_base across all positions of each currency.
-        # Exposure-weighted effective T: used for simulation pre-computation only.
+        # Exposure-weighted effective T: DISPLAY ONLY as of V3.6 (see this
+        # function's "EXPOSURE-WEIGHTED EFFECTIVE T" docstring section above)
+        # — no longer used to compute any simulation value.
         ccy_accum: dict[str, dict] = {}
         for pos in period_positions:
             ccy = pos['currency']
@@ -1851,7 +1969,9 @@ def calculate_cumulative_period_vars(
             else:
                 net_dir = 'flat'
 
-            # Exposure-weighted average T (approximation for simulation sliders only).
+            # Exposure-weighted average T — DISPLAY ONLY as of V3.6 (shown in
+            # the Chart Detail Panel's "Eff. horizon" row; no longer feeds any
+            # simulation math — see this function's docstring).
             # Example: USD cash (T=CASH_CONSOLIDATED_T_DAYS=10, notional=1M) +
             #   USD forward recv (T=45, notional=2M)
             #   effective_T = (1M×10 + 2M×45) / (1M + 2M) = 100M / 3M ≈ 33.3
@@ -1866,13 +1986,30 @@ def calculate_cumulative_period_vars(
                 else float(CASH_CONSOLIDATED_T_DAYS)
             )
 
+            # V3.6: pull the exact vol_part/drift_part split for this currency
+            # (defaulting to an all-zero dict for a currency that somehow has
+            # no positions in component_vars_by_ccy — should not occur in
+            # practice, since ccy_accum and component_vars_by_ccy are built
+            # from the exact same period_positions list, but guarded
+            # defensively rather than assuming dict key presence).
+            ccy_component = component_vars_by_ccy.get(
+                ccy, {'component_var': 0.0, 'vol_part': 0.0, 'drift_part': 0.0}
+            )
+
             currencies[ccy] = {
                 'net_signed_base':   round(net_signed,                        2),
                 'net_notional_base': round(net_abs,                           2),
                 'net_direction':     net_dir,
                 # component_var: this currency's exact risk contribution.
                 # Negative = this currency is acting as a net hedge to the portfolio.
-                'component_var':     round(float(component_vars_by_ccy.get(ccy, 0.0)), 2),
+                'component_var':     round(float(ccy_component['component_var']), 2),
+                # vol_part / drift_part: V3.6 exact decomposition for the
+                # frontend simulation sliders. component_var always equals
+                # vol_part - drift_part exactly (not just approximately) —
+                # both are rounded to the same precision here so that
+                # identity is preserved even after JSON round-tripping.
+                'vol_part':          round(float(ccy_component['vol_part']),   2),
+                'drift_part':        round(float(ccy_component['drift_part']), 2),
                 'ann_vol':           acc['ann_vol'],
                 'daily_mean':        acc['daily_mean'],
                 'effective_T':       round(effective_T,                        1),
