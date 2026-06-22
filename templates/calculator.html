@@ -1163,7 +1163,8 @@
           <h4>Currency Appreciation / Depreciation</h4>
           <p class="sim-desc">
             Shift one currency's spot rate against the full portfolio.
-            Stressed Portfolio VaR scales exactly with spot rate.
+            Stressed Portfolio VaR scales smoothly with spot rate
+            (approximate for currencies correlated with the one shifted).
           </p>
           <div class="currency-picker">
             <label for="portfolioSpotCcySelect">Currency</label>
@@ -1208,13 +1209,15 @@
       </div>
 
       <p class="sim-note">
-        <strong style="color:var(--muted)">Approximation:</strong>
-        same method as the Risk Dashboard's Period VaR strip — each currency's
-        Component CFaR is scaled independently (no covariance matrix
-        recomputation in the browser) and summed. Zero-notional currencies
-        (the cross-horizon residual case) use a rougher version of this same
-        approximation — see the Risk Dashboard's Scenario Simulation note
-        below for detail.
+        <strong style="color:var(--muted)">Volatility shift:</strong>
+        exact — each currency's Component CFaR is computed from the real
+        per-position vol/drift decomposition (not an approximation), and
+        summing across currencies reproduces exactly what a full server-side
+        recalculation at that volatility level would give.
+        <strong style="color:var(--muted)">Spot shift:</strong>
+        an approximation for currencies other than the one selected — shifting
+        one currency's exposure changes its correlation with the rest of the
+        portfolio in a way a simple scale factor can't fully capture.
         <strong style="color:var(--muted)">At 0% / 0%:</strong>
         exactly equals the Consolidated Portfolio VaR figure above.
         <strong style="color:var(--muted)">Independent:</strong>
@@ -1427,7 +1430,8 @@
           <h4>Currency Appreciation / Depreciation</h4>
           <p class="sim-desc">
             Shift the selected currency's spot rate. +10% = FCY appreciates
-            (buys 10% more base currency). CFaR scales exactly with spot rate.
+            (buys 10% more base currency). CFaR scales smoothly with spot
+            rate (approximate for currencies correlated with the one shifted).
           </p>
           <div class="currency-picker">
             <label for="spotCcySelect">Currency</label>
@@ -1471,21 +1475,21 @@
         bar values equal the exact server-side covariance decomposition — their sum
         equals Period VaR exactly (Euler decomposition theorem; cross-currency
         correlations are encoded inside each component, not lost).
-        <strong style="color:var(--muted)">While sliding:</strong>
-        each currency's vol term is scaled independently without rerunning the
-        covariance matrix, so the Period VaR strip becomes an approximation —
-        conservative (slightly overstates risk) by an amount proportional to
-        cross-currency correlation.
-        <strong style="color:var(--muted)">Zero-notional currencies:</strong>
-        a currency with zero net notional but non-zero Component CFaR (the
-        cross-horizon residual case — see the Chart Detail Panel above) uses a
-        rougher approximation while sliding, scaling its whole CFaR by the vol
-        shift directly rather than the exact vol/drift decomposition used for
-        other currencies. A proper exact fix for this case is planned.
+        <strong style="color:var(--muted)">Volatility shift:</strong>
+        exact, for every currency including one with zero net notional but
+        non-zero Component CFaR (the cross-horizon residual case — see the
+        Chart Detail Panel above). Each currency's real vol/drift
+        decomposition is used directly, and the Period VaR strip's sum
+        reproduces exactly what a full server-side recalculation at that
+        volatility level would give — not an approximation.
+        <strong style="color:var(--muted)">Spot shift:</strong>
+        an approximation for the portfolio total, since shifting one
+        currency's exposure changes its correlation with every other
+        currency in a way a simple scale factor can't fully capture.
         <strong style="color:var(--muted)">Never updated by sliders:</strong>
         the Portfolio VaR stat card — that is fixed at the exact server-computed
         value for the original inputs. Re-run Calculate to get exact numbers at
-        a different vol assumption.
+        a genuinely different spot-rate assumption.
       </p>
     </div>
 

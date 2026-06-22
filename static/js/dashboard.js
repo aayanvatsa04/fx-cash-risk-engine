@@ -1,5 +1,5 @@
 /**
- * dashboard.js — Risk Dashboard Rendering Layer (V3.2)
+ * dashboard.js — Risk Dashboard Rendering Layer (V3.7)
  *
  * This file handles all chart and dashboard rendering inside the unified
  * calculator page (calculator.html). It is loaded once as a separate script
@@ -120,16 +120,80 @@
  * exactly — both are computed by the identical min(Tᵢ,Tⱼ) covariance method
  * over the identical full position list (see exposure_engine.py's
  * CUMULATIVE_PERIOD_DEFINITIONS docstring for the guarantee). This means
- * the 'all' period's per-currency vol_term/mu_term/cfar values — already
+ * the 'all' period's per-currency vol_part/drift_part/cfar values — already
  * sent to the frontend for the Risk Dashboard's "All" filter option — are
  * equally valid inputs for stressing the Consolidated VaR figure. See
  * updatePortfolioSimulation(), which reuses applySimulation() unchanged.
+ *
+ * === V3.6 CHANGE: EXACT VOL SLIDER (replaces net_notional_base-derived
+ *     vol_term/mu_term with the real per-position vol/drift decomposition) ===
+ *
+ * Both slider pairs above call the SAME applySimulation() function, which
+ * previously approximated a currency's vol-shifted Component CFaR using
+ * vol_term/mu_term — two values computed from net_notional_base (the
+ * currency's NET signed exposure) and a single exposure-weighted
+ * effective_T. Testing against a real portfolio found this approximation
+ * could be severely wrong: jumps of several hundred percent — and even
+ * sign flips (a currency that genuinely reduces portfolio risk appearing
+ * to increase it) — from a vol slider move of a few thousandths of a
+ * percent. The root cause: vol_term/mu_term were a standalone,
+ * single-position-style estimate that ignored cross-currency covariance
+ * entirely, while the exact Component CFaR it was meant to approximate is
+ * fundamentally a MARGINAL quantity, dependent on the full covariance
+ * matrix. These are different quantities by construction, with no
+ * guarantee of agreeing even in the Δ_vol→0 limit. (A more extreme special
+ * case of the same root problem — a flat/zero-net-notional currency always
+ * showing vol_term=mu_term=0 regardless of its real Component CFaR — was
+ * patched as an interim fix in V3.5; V3.6 supersedes that patch entirely.)
+ *
+ * V3.6 replaces this with vol_part/drift_part — the exact decomposition,
+ * computed in exposure_engine.py's _compute_component_vars_by_currency()
+ * directly from the same per-position arrays that already produce the
+ * exact static Component CFaR. By construction, vol_part − drift_part
+ * equals the exact cfar at rest, and under a UNIFORM vol-regime shift
+ * (exactly what this slider does), vol_part scales EXACTLY linearly — a
+ * provable mathematical identity, not a better approximation. See that
+ * function's docstring for the full derivation, and applySimulation()'s
+ * docstring below for the resulting single, universal formula (no more
+ * long/short/flat branching). Verified empirically: a full engine re-run
+ * at a stressed vol level matched this formula's prediction to within
+ * floating-point rounding.
+ *
+ * === V3.7 CHANGE: COMPONENT CFaR BARS — LOCKED ORDER/SCALE, SMOOTH UPDATES ===
+ *
+ * Even with V3.6's exact numbers underneath, the Component CFaR bars still
+ * visually behaved badly on a tiny slider move: renderCfarBarsForPeriod()
+ * was being called again on EVERY slider tick, which (a) re-sorted the
+ * bars by current |CFaR| every time — letting two currencies close in
+ * magnitude visually swap rank from a fractional-percent change — and
+ * (b) rebuilt the section's entire innerHTML every time, which silently
+ * defeated the .cfar-bar-fill CSS width transition (a transition only
+ * animates an EXISTING element's property change; destroying and
+ * recreating every element every tick gives the browser nothing to
+ * animate from, so bars snapped instead of sliding).
+ *
+ * V3.7 splits this into two functions with a clear division of labour:
+ *   - renderCfarBarsForPeriod() — runs ONCE per period (a fresh Calculate
+ *     or a period-dropdown change, both of which reset sliders to 0
+ *     first), sorts by |CFaR| descending, and LOCKS that order plus the
+ *     scaling denominator (cfarBarsState) for the rest of the period's
+ *     lifetime.
+ *   - updateCfarBarsInPlace() — runs on every subsequent slider tick,
+ *     reusing the LOCKED order/denominator and mutating each row's
+ *     existing width/value directly rather than rebuilding anything.
+ *
+ * Net effect: bars are arranged top-to-bottom once, when a period first
+ * renders with no simulation applied — exactly matching "ordered at rest,
+ * stable while exploring" — and each bar's width now visibly, smoothly
+ * tracks its own value via the CSS transition while a slider is dragged,
+ * instead of jumping. See updateCfarBarsInPlace()'s docstring for the
+ * full before/after explanation and the "fixed denominator" rationale.
  *
  * === WHAT THIS FILE DOES NOT DO ===
  *
  * - No form handling (that's in calculator.html's inline script)
  * - No fetch calls (the calculator JS fetches; this just consumes the result)
- * - No VaR formulas — simulation uses pre-computed vol_term and mu_term
+ * - No VaR formulas — simulation uses pre-computed vol_part and drift_part
  *   provided by dashboard_engine.py's _process_cumulative_periods()
  * - Does not render the STATIC content of the Consolidated VaR card
  *   (headline number, interpretation sentence, position breakdown) — that
@@ -139,28 +203,33 @@
  *
  * === SIMULATION MATHEMATICS (for reference — used by BOTH slider pairs) ===
  *
- * Volatility slider (Δ_vol, long/short currencies):
- *   new_cfar_long  = Math.max(vol_term * (1 + Δ_vol) - mu_term, 0)
- *   new_cfar_short = Math.max(vol_term * (1 + Δ_vol) + mu_term, 0)
- *   Note: mu_term (drift) does NOT scale with vol — it is independent of the
- *         volatility regime. vol_term uses exposure-weighted effective_T per
- *         currency (an approximation for multi-horizon periods).
- *
- * Volatility slider (Δ_vol, FLAT currencies — V3.5 interim fix):
- *   new_cfar = Math.max(cfar * (1 + Δ_vol), 0)
- *   A flat (net-notional-zero) currency can still carry real Component CFaR
- *   from the cross-horizon residual case — vol_term/mu_term are both 0 for
- *   these currencies (derived from net_notional_base), so they cannot be
- *   used. This scales the static exact cfar directly instead — an interim
- *   approximation, not the exact result. See applySimulation()'s full
- *   docstring for the bug this replaced and the proper (deferred, backend-
- *   touching) fix.
+ * Volatility slider (Δ_vol, ANY currency — long, short, or flat alike):
+ *   new_cfar = (1 + Δ_vol) * vol_part − drift_part
+ *   EXACT as of V3.6 — vol_part and drift_part are computed server-side
+ *   (exposure_engine.py) from the same per-position arrays that produce the
+ *   exact static cfar, not from net_notional_base or any single-T
+ *   approximation. One formula for every currency; no direction branching,
+ *   no special-casing for zero-net-notional currencies. See
+ *   applySimulation()'s docstring for the full proof and the bug history
+ *   (V3.0–V3.5) this replaced — jumps of several hundred percent, and even
+ *   sign flips, were observed from the old net_notional_base-derived
+ *   vol_term/mu_term approach.
  *
  * Spot slider (Δ_spot, selected currency only):
- *   new_cfar = Math.max(cfar * (1 + Δ_spot), 0)   ← exact: VaR ∝ E ∝ spot rate
+ *   new_cfar = cfar * (1 + Δ_spot)
+ *   A smooth, continuous approximation — first-order correct for this
+ *   currency's own component, exact only absent correlation with the rest
+ *   of the portfolio; other currencies are left frozen rather than
+ *   reflecting the small cross-covariance effect a real shift would cause.
+ *   See applySimulation()'s docstring, "SPOT SHIFT REMAINS AN
+ *   APPROXIMATION — but a SMOOTH one", for the empirically-measured error
+ *   size and why this differs in kind from the (now-fixed) vol-slider bug.
  *
- * === SIMULATION APPROXIMATION — why the Period VaR strip AND the Stressed
- *     Portfolio VaR figure both diverge from the exact value while sliding ===
+ * Neither formula floors at zero (see applySimulation()'s docstring,
+ * "NO FLOOR AT ZERO") — a negative Component CFaR is a meaningful, real
+ * state (a currency net-hedging the rest of the portfolio), not an error.
+ *
+ * === SIMULATION APPROXIMATION — what's still approximate vs. now exact, V3.6 ===
  *
  * At Δ=0 (sliders at rest): component CFaRs sum EXACTLY to the relevant
  * server-computed value — period_var for the Risk Dashboard's active
@@ -168,17 +237,28 @@
  * number when the Risk Dashboard's period happens to be 'all' — see above)
  * — by the Euler decomposition theorem.
  *
- * At Δ_vol ≠ 0: the vol slider scales each currency's vol_term independently.
- * Cross-currency correlations (ρ terms in the covariance matrix) are NOT
- * recomputed in the browser — doing so would require sending the full n×n
- * matrix and running matrix multiplication on every slider tick. The
- * per-currency sum therefore slightly OVERSTATES the true diversified VaR
- * (conservative bias proportional to ρ). This applies identically to both
- * the Period VaR strip and the Stressed Portfolio VaR figure, since both
- * are built from the same applySimulation() summation pattern.
+ * At Δ_vol ≠ 0, Δ_spot = 0 (pure vol-regime shift — V3.6, now EXACT): the
+ * Period VaR strip and the Stressed Portfolio VaR figure now equal exactly
+ * what a full server-side re-run at that vol level would produce — not an
+ * approximation. This follows directly from vol_part summing the same way
+ * at the portfolio level as it does per-currency (see
+ * exposure_engine.py's _compute_component_vars_by_currency() docstring for
+ * the proof), and was verified empirically: a full engine re-run at a
+ * stressed vol level matched the formula's prediction to within
+ * floating-point rounding.
  *
- * This is a deliberate design tradeoff: fast live preview vs exact math.
- * All VaR math stays in Python. Re-running Calculate gives the exact figure.
+ * At Δ_spot ≠ 0 (with or without a simultaneous vol shift): still an
+ * approximation. Shifting one currency's exposure changes its
+ * cross-covariance terms with every OTHER currency too, which a simple
+ * per-currency scale factor cannot capture without rerunning the full n×n
+ * matrix server-side. The per-currency sum in this case can diverge from
+ * the true diversified VaR by an amount related to that currency's
+ * correlation with the rest of the portfolio.
+ *
+ * This is a deliberate design tradeoff for the remaining spot-shift case:
+ * fast live preview vs exact math. All VaR math stays in Python.
+ * Re-running Calculate gives the exact figure for any combination of
+ * inputs, including a genuinely different spot-rate assumption.
  */
 
 'use strict';
@@ -203,6 +283,16 @@ let chart            = null;  // Chart.js instance (destroyed + recreated on per
 let portfolioActiveSpotCcy = null;  // currency selected in the Portfolio Scenario dropdown
 let portfolioDeltaSpot     = 0.0;   // Portfolio Scenario spot slider delta (−0.10 to +0.10)
 let portfolioDeltaVol      = 0.0;   // Portfolio Scenario vol slider delta (−0.25 to +0.25)
+
+// --- Component CFaR bars locked-baseline state (V3.7) ---
+// Established once per period render (renderCfarBarsForPeriod, called from
+// renderChartForPeriod on a fresh Calculate or period switch) and then
+// reused, UNCHANGED, by every slider tick (updateCfarBarsInPlace) until the
+// next period render. This is what stops the bars from re-sorting or
+// re-scaling against each other while a slider is being dragged — see
+// updateCfarBarsInPlace()'s docstring for the full rationale. null when no
+// bars are currently rendered (e.g. the active period has no currencies).
+let cfarBarsState = null;
 
 
 // ============================================================
@@ -876,14 +966,51 @@ function renderPeriodInfoStrip(period) {
 
 
 // ============================================================
-// COMPONENT CFaR BARS  (V3.2 — new, separate from the notional chart)
+// COMPONENT CFaR BARS  (V3.2 — separate from the notional chart;
+//                       V3.7 — locked order/scale, in-place updates)
 // ============================================================
 
 /**
+ * Computes a Component CFaR bar's width percentage relative to a given
+ * scaling denominator. Shared by renderCfarBarsForPeriod() (establishing
+ * the initial, locked baseline) and updateCfarBarsInPlace() (every
+ * subsequent slider tick), so the exact same floor/ceiling rules apply
+ * whether a bar is being built fresh or just resized.
+ *
+ * A small minimum width (2%) is applied to any non-trivial (≥1 unit) CFaR
+ * so it remains visibly present as a sliver even when dwarfed by the
+ * largest bar in the period, rather than rendering as an invisible
+ * zero-width track. A maximum of 100% is also applied — see
+ * updateCfarBarsInPlace()'s docstring, "WHY A FIXED DENOMINATOR", for why
+ * a simulated value can legitimately want to exceed the locked baseline's
+ * scale, and why clamping (rather than letting the bar overflow its track)
+ * is the simplest safe handling for that case.
+ *
+ * @param {number} cfar       — this currency's (possibly simulated) Component CFaR
+ * @param {number} maxAbsCfar — the scaling denominator (locked or fresh)
+ * @returns {number} width percentage, 0–100
+ */
+function _cfarBarWidthPct(cfar, maxAbsCfar) {
+    const absCfar = Math.abs(cfar);
+    if (absCfar < 1) return 0;
+    return Math.min(Math.max((absCfar / maxAbsCfar) * 100, 2), 100);
+}
+
+/**
  * Renders the Component CFaR horizontal bar section beneath the notional
- * chart, inside the #dashCfarBars container. Plain HTML/CSS — no Chart.js
- * instance, no canvas — since these bars only ever need a simple
- * proportional width, not interactive tooltips or axes.
+ * chart, inside the #dashCfarBars container, AND establishes the locked
+ * baseline (display order + scaling denominator + DOM element references)
+ * that updateCfarBarsInPlace() will reuse for every subsequent slider tick
+ * — see that function's docstring for why this two-function split exists.
+ *
+ * Called only at the start of a period's lifetime: from
+ * renderChartForPeriod(), which itself only runs on a fresh Calculate
+ * response or a period-dropdown change — both of which reset the Risk
+ * Dashboard's sliders to 0 first (see renderDashboard() and
+ * handlePeriodChange()). So the baseline locked here is always the true
+ * Δ=0 state, exactly matching the intent: bars are ordered top-to-bottom
+ * once, when you first see a period with no simulation applied yet, and
+ * stay in that order while you experiment with the sliders afterwards.
  *
  * === WHY A SEPARATE BAR SYSTEM (see module docstring for full rationale) ===
  *
@@ -899,29 +1026,6 @@ function renderPeriodInfoStrip(period) {
  * section — to make that case visible and self-explanatory rather than
  * a confusing label inside an unrelated bar.
  *
- * === SCALING AND SORTING ===
- *
- * Bar widths are scaled relative to the LARGEST |Component CFaR| present
- * in the currently selected period (not relative to net notional, and not
- * relative to Period VaR) — so the single riskiest currency always renders
- * a full-width reference bar, exactly like the existing .compare-bars
- * pattern used in the Cash Book Risk diversification display (gross vs.
- * net VaR on a shared scale). Rows are sorted by |Component CFaR|
- * descending, so the biggest threat always appears first regardless of how
- * the notional chart above happens to be ordered.
- *
- * A small minimum width (2%) is applied to any non-trivial (≥ 1 unit) CFaR
- * so it remains visibly present as a sliver even when dwarfed by the
- * largest bar in the period, rather than rendering as an invisible
- * zero-width track.
- *
- * === SIMULATION ===
- *
- * Called both on initial period render (from renderChartForPeriod) and on
- * every Risk Dashboard slider tick (from updateChartSimulation), using the
- * SAME applySimulation() function as the notional chart — so both bar
- * systems always reflect identical, internally consistent slider deltas.
- *
  * @param {string} periodKey — e.g. '3m'; looked up fresh from dashboardData
  *                              each call rather than passed pre-resolved,
  *                              so this function is safe to call independently
@@ -936,14 +1040,27 @@ function renderCfarBarsForPeriod(periodKey) {
     if (!period || period.currencies.length === 0) {
         container.innerHTML =
             '<div class="cfar-bars-empty">No exposure data for this time period.</div>';
+        // Nothing to lock for an empty period — and explicitly clearing any
+        // PREVIOUS period's lock here matters: without this, a stray
+        // updateCfarBarsInPlace() call (e.g. a slider 'input' event firing
+        // while data briefly transitions between periods) would otherwise
+        // find a stale lock from a different, no-longer-active period and
+        // try to update DOM elements that this innerHTML write just
+        // destroyed — the periodKey guard in updateCfarBarsInPlace() would
+        // catch that too, but clearing the lock here is the more direct,
+        // unambiguous fix at the source.
+        cfarBarsState = null;
         return;
     }
 
     const baseCcy = dashboardData.base_ccy;
 
-    // Apply current Risk Dashboard simulation deltas — identical inputs to
-    // the notional chart above, so both sections always stay consistent
-    // with each other and with the Period VaR strip's running total.
+    // Apply current Risk Dashboard simulation deltas. In practice this is
+    // always Δ=0 here (see this function's docstring) — applySimulation()
+    // is still used rather than reading c.cfar directly, so this function
+    // remains correct even if ever called again with non-zero deltas
+    // already active, and so the lock-time values are computed by the
+    // exact same code path as every later in-place update.
     const rows = period.currencies.map(c => {
         const sim = applySimulation(c, deltaSpot, deltaVol, activeSpotCcy);
         return { currency: c.currency, direction: c.net_direction, cfar: sim.cfar };
@@ -951,24 +1068,28 @@ function renderCfarBarsForPeriod(periodKey) {
 
     // Sort by risk magnitude descending — the biggest threat renders first,
     // independent of the notional chart's own currency ordering above.
+    // This sort runs ONCE, here, at lock time. It is intentionally NOT
+    // repeated by updateCfarBarsInPlace() — see that function's docstring
+    // for why re-sorting on every slider tick was a problem worth fixing.
     rows.sort((a, b) => Math.abs(b.cfar) - Math.abs(a.cfar));
 
     // Scale every bar relative to the largest CFaR in this period. The 0.01
     // floor guards against a divide-by-zero when every currency is fully
     // hedged (all component CFaRs are zero) within the selected window.
+    // This denominator is also LOCKED here — see updateCfarBarsInPlace()'s
+    // docstring, "WHY A FIXED DENOMINATOR", for why it stays fixed rather
+    // than being recomputed from live simulated values on every tick.
     const maxAbsCfar = Math.max(...rows.map(r => Math.abs(r.cfar)), 0.01);
 
+    // data-ccy on each row lets updateCfarBarsInPlace() (and the element-
+    // capture step right below) reliably re-locate a specific currency's
+    // row after innerHTML parsing, via an explicit attribute match rather
+    // than relying on array/DOM ordering staying in lockstep.
     container.innerHTML = rows.map(r => {
-        const absCfar  = Math.abs(r.cfar);
-        // Proportional width, with a 2% visible-sliver floor for any
-        // non-trivial (≥1 unit) CFaR so it never renders as an invisible
-        // zero-width track purely due to being dwarfed by the top bar.
-        const pct      = absCfar >= 1
-            ? Math.max((absCfar / maxAbsCfar) * 100, 2)
-            : 0;
+        const pct      = _cfarBarWidthPct(r.cfar, maxAbsCfar);
         const dirClass = r.direction;  // 'long' | 'short' | 'flat' — matches bar/legend colours above
         return `
-          <div class="cfar-bar-row">
+          <div class="cfar-bar-row" data-ccy="${r.currency}">
             <div class="cfar-bar-label">
               <span class="cfar-bar-ccy">${r.currency}</span>
             </div>
@@ -978,6 +1099,112 @@ function renderCfarBarsForPeriod(periodKey) {
             <div class="cfar-bar-value">${baseCcy} ${fmtNum(r.cfar)}</div>
           </div>`;
     }).join('');
+
+    // Capture direct references to each row's mutable elements (the fill
+    // bar and the value text) — this is what lets updateCfarBarsInPlace()
+    // mutate them directly on every slider tick instead of rebuilding
+    // innerHTML each time. See that function's docstring for why this
+    // matters for both animation (CSS transitions only animate an EXISTING
+    // element's property change) and performance (no full DOM rebuild on
+    // every 'input' event during a drag).
+    const elements = {};
+    rows.forEach(r => {
+        // Currency codes are always simple 3-letter uppercase ISO codes from
+        // the backend (e.g. "USD", "MYR") — never arbitrary or user-controlled
+        // strings — so they're safe to interpolate directly into this attribute
+        // selector without CSS.escape(). (Deliberately not using CSS.escape()
+        // here: it adds a dependency on a Web API absent from some lightweight
+        // test/SSR environments, for a risk — special characters in a currency
+        // code — that cannot occur given where this data comes from.)
+        const rowEl = container.querySelector(`.cfar-bar-row[data-ccy="${r.currency}"]`);
+        if (!rowEl) return;  // defensive — should not happen, every row was just created above
+        elements[r.currency] = {
+            fill:  rowEl.querySelector('.cfar-bar-fill'),
+            value: rowEl.querySelector('.cfar-bar-value'),
+        };
+    });
+
+    cfarBarsState = { periodKey, order: rows.map(r => r.currency), maxAbsCfar, elements };
+}
+
+/**
+ * Updates the Component CFaR bars' widths and values IN PLACE for the
+ * current slider state — mutating each row's existing DOM elements
+ * directly, rather than calling renderCfarBarsForPeriod() again (which
+ * would rebuild the whole section from scratch on every single slider
+ * 'input' event). Called from updateChartSimulation() on every Risk
+ * Dashboard slider tick.
+ *
+ * === THE PROBLEM THIS FIXES ===
+ *
+ * Before V3.7, every slider tick called renderCfarBarsForPeriod() again,
+ * which did two things that made the bars feel chaotic for even a tiny
+ * slider move:
+ *
+ *   1. RE-SORTED on every tick. Two currencies close in |Component CFaR|
+ *      could swap visual rank from a fractional-percent input change,
+ *      making the whole list appear to reshuffle for what was actually a
+ *      small, real change underneath.
+ *   2. REBUILT THE ENTIRE innerHTML on every tick. The CSS rule
+ *      `transition: width 0.4s ease` on .cfar-bar-fill (see dashboard.css)
+ *      was effectively dead code in this situation — a CSS transition only
+ *      animates when an EXISTING element's property changes; destroying
+ *      and recreating every element on every tick gives the browser
+ *      nothing to animate FROM, so bars visually snapped to their new
+ *      widths instead of sliding smoothly.
+ *
+ * V3.7 fixes both: this function uses the LOCKED order and LOCKED scaling
+ * denominator from cfarBarsState (established once by
+ * renderCfarBarsForPeriod() at Δ=0 — see that function's docstring) and
+ * only ever touches each row's OWN width/value, via direct property
+ * mutation on the SAME DOM nodes captured at lock time. Bars never
+ * reorder or rescale against each other while a slider is being dragged;
+ * each one just smoothly tracks its own current value against a fixed
+ * ruler, and the CSS transition now has something real to animate between.
+ *
+ * === WHY A FIXED DENOMINATOR (not recomputed live) ===
+ *
+ * If maxAbsCfar were recomputed from the CURRENT simulated values on every
+ * tick (as it was before V3.7), then even a currency whose own CFaR barely
+ * moved could visibly grow or shrink — because the bar it's being measured
+ * against changed size too. Locking the denominator at the baseline means
+ * every bar's width purely reflects how THAT currency's own CFaR is moving
+ * relative to a FIXED reference — which is what actually produces a
+ * "continuously chasing from baseline" feel rather than the entire ruler
+ * being redrawn under everything else at the same time.
+ *
+ * One consequence: if a currency's simulated CFaR grows large enough under
+ * stress to exceed the locked baseline's max, its bar's proportional width
+ * would technically want to exceed 100%. _cfarBarWidthPct() clamps at 100%
+ * rather than letting it overflow the track visually — simple and safe;
+ * the printed value text is never clamped, so the exact number is always
+ * still readable even if the bar itself is visually maxed out.
+ *
+ * No-ops safely if cfarBarsState is null (e.g. the active period has no
+ * currencies) or belongs to a different period than the one currently
+ * active (a defensive guard against a stale call landing right after a
+ * period switch, before the new period's renderCfarBarsForPeriod() call
+ * has re-established the lock).
+ */
+function updateCfarBarsInPlace() {
+    if (!cfarBarsState || cfarBarsState.periodKey !== activePeriodKey || !dashboardData) return;
+
+    const period = dashboardData.cumulative_periods.find(p => p.key === activePeriodKey);
+    if (!period) return;
+
+    const baseCcy = dashboardData.base_ccy;
+
+    cfarBarsState.order.forEach(ccy => {
+        const refs = cfarBarsState.elements[ccy];
+        const c    = period.currencies.find(x => x.currency === ccy);
+        if (!refs || !c) return;  // defensive — should not happen in practice
+
+        const sim = applySimulation(c, deltaSpot, deltaVol, activeSpotCcy);
+        const pct = _cfarBarWidthPct(sim.cfar, cfarBarsState.maxAbsCfar);
+
+        refs.fill.style.width  = `${pct}%`;
+        refs.value.textContent = `${baseCcy} ${fmtNum(sim.cfar)}`;
+    });
 }
 
 
@@ -987,78 +1214,101 @@ function renderCfarBarsForPeriod(periodKey) {
 
 /**
  * Applies current simulation deltas to a single currency entry.
- * Works identically for both bucket currencies (V2) and period currencies (V3)
- * because both have the same field names: cfar, vol_term, mu_term,
- * net_notional_base, net_direction.
  *
  * Spot shift (selected currency only):
  *   new_net_notional = net_notional_base × (1 + Δ_spot)
- *   new_cfar         = cfar × (1 + Δ_spot)   ← exact (VaR ∝ E ∝ spot_rate)
+ *   new_cfar         = cfar × (1 + Δ_spot)
+ *   Exact ONLY if this currency has no correlation with anything else in
+ *   the portfolio. In a realistic portfolio it's an approximation, but a
+ *   smoothly continuous one — see "SPOT SHIFT REMAINS AN APPROXIMATION"
+ *   below for the full picture (this was previously overstated as simply
+ *   "exact" here; corrected after empirical testing).
  *
- * Vol shift (long/short currencies):
- *   new_cfar_long  = max(vol_term × (1 + Δ_vol) − mu_term, 0)
- *   new_cfar_short = max(vol_term × (1 + Δ_vol) + mu_term, 0)
- *   Note: mu_term does NOT scale with vol — drift is independent of vol regime.
- *         Scaling the whole cfar by (1+Δ) would incorrectly also scale mu_term.
+ * Vol shift (V3.6 — ONE exact formula for every currency, any direction):
+ *   new_cfar = (1 + Δ_vol) × vol_part − drift_part
  *
- * For period currencies, vol_term and mu_term use the exposure-weighted
- * effective_T (a per-currency approximation for multi-horizon periods).
- * For single-position currencies the formula is exact.
+ * === V3.6: EXACT VOL SLIDER — REPLACES THE V3.0–V3.5 APPROXIMATIONS ===
  *
- * Vol shift (flat currencies — V3.5 INTERIM FIX, see below):
- *   new_cfar = max(cfar × (1 + Δ_vol), 0)
+ * vol_part and drift_part arrive from exposure_engine.py's
+ * _compute_component_vars_by_currency(), computed from the SAME per-position
+ * vol_component/drift_contribution arrays that produce the exact static
+ * `cfar` itself — NOT from net_notional_base, and NOT from an
+ * exposure-weighted single-T approximation. By construction,
+ * vol_part − drift_part = cfar EXACTLY at Δ_vol = 0 (same formula, evaluated
+ * at multiplier 1) — so there is no discontinuity at rest, for any currency,
+ * including a currency with zero net notional but real Component CFaR (the
+ * cross-horizon residual case — see renderChartDetailPanel()'s tooltip).
  *
- * === V3.5 BUG FIX: FLAT CURRENCIES NO LONGER SNAP TO ZERO ON ANY VOL MOVE ===
+ * It is also EXACT while sliding, not just continuous at the boundary. Under
+ * a uniform vol-regime shift (every currency's σ scaled by the same factor
+ * k = 1+Δ_vol — exactly what this slider does), vol_part scales EXACTLY
+ * linearly by k: this is a provable identity, not an approximation,
+ * following from the covariance matrix being homogeneous of degree 2 in σ.
+ * See exposure_engine.py's _compute_component_vars_by_currency() docstring
+ * for the full derivation. Verified empirically against a full engine
+ * re-run at a stressed vol level: predicted and actual period VaRs matched
+ * to within floating-point rounding.
  *
- * Previously this branch was `cfar = 0` unconditionally whenever
- * net_direction === 'flat' and dVol !== 0 — i.e. ANY non-zero vol delta,
- * even ±0.1%, instantly zeroed a flat currency's CFaR. This was wrong: a
- * currency can be net-flat in notional while still carrying real, non-zero
- * Component CFaR from the cross-horizon residual case (same-currency
- * positions that cancel in notional but settle at different dates — see
- * renderChartDetailPanel()'s cross-horizon tooltip for the full
- * min(Tᵢ,Tⱼ) explanation). That residual risk doesn't vanish just because
- * a vol slider moved a fraction of a percent; it should scale smoothly
- * with the vol regime, not collapse discontinuously to zero.
+ * This single formula replaces ALL of the old branching logic:
+ *   - No more separate long/short formulas (the old
+ *     `vol_term*(1+Δv) ∓ mu_term` sign-flip hack — vol_part/drift_part
+ *     already carry the correct sign per-position, summed correctly
+ *     regardless of mixed directions within a currency).
+ *   - No more flat-currency special case (the V3.5 interim patch — a flat
+ *     currency's vol_part/drift_part are computed from its real positions,
+ *     not from net_notional_base, so they are non-zero whenever the
+ *     currency's real Component CFaR is non-zero).
  *
- * WHY vol_term/mu_term CAN'T BE USED HERE: both are precomputed server-side
- * as `net_notional_base × (something)` (see dashboard_engine.py's
- * _process_currency_entry). For a flat currency, net_notional_base = 0, so
- * vol_term = 0 and mu_term = 0 are already baked in from the backend —
- * using them would still produce zero regardless of this function's logic.
- * They were designed assuming "one currency = one net position," which
- * does not hold for the cross-horizon residual case (the real Component
- * CFaR there comes from the INDIVIDUAL receivable/payable legs, not from
- * their — zero — sum).
+ * NO FLOOR AT ZERO: previous versions applied Math.max(result, 0) to every
+ * branch. This was actually a hidden SOURCE of discontinuity, not a safety
+ * net — the static ccy.cfar itself is never floored server-side (a
+ * currency that hedges the rest of the portfolio can have a genuinely
+ * negative component_var — see exposure_engine.py's docstring, "Negative
+ * component VaR"), so flooring only the simulated path created a mismatch
+ * between Δ_vol = 0 (can show negative) and Δ_vol ≠ 0 (was forced to ≥ 0)
+ * right at the boundary. Removed here for both the vol shift AND the spot
+ * shift (Step 2 below) so the simulated value is continuous with the exact
+ * static value in BOTH sign and magnitude, not just magnitude.
  *
- * INTERIM APPROXIMATION (this fix): scale the static, exact ccy.cfar
- * directly by (1 + Δ_vol), treating the entire residual as if it were pure
- * volatility-driven risk. This is NOT exact — it ignores whatever (usually
- * small) drift contribution is mixed into that residual, which we cannot
- * separate out without a proper per-position vol/drift decomposition. But
- * it is a much better approximation than snapping to zero: it moves
- * smoothly and in the right direction as the vol slider moves, with no
- * discontinuity at Δ_vol = 0.
+ * === SPOT SHIFT REMAINS AN APPROXIMATION — but a SMOOTH one (unchanged by V3.6) ===
  *
- * TODO — PROPER FIX (flagged for a future, backend-touching change): there
- * is an EXACT fix available, not just a better approximation. Under a
- * UNIFORM vol-regime shift (every currency's σ scaled by the same factor
- * k = 1+Δ_vol, which is what this slider does), the volatility-driven part
- * of EVERY position's Component VaR scales EXACTLY linearly by k — this
- * follows from the covariance matrix being homogeneous of degree 2 in σ
- * (every Σ[i,j] term contains σᵢ×σⱼ, so the whole matrix scales by k²,
- * which exactly cancels against portfolio vol's own k-scaling in the
- * component formula sᵢ(Σs)ᵢ/σ_p). This holds regardless of net notional —
- * including the flat/cross-horizon case. To use this exactly, the backend
- * (exposure_engine.py's _compute_component_vars_by_currency) would need to
- * expose two new per-currency sums — the vol-driven part and the
- * drift-driven part of Component CFaR, computed from the real per-position
- * structure — rather than the current net_notional_base-derived
- * vol_term/mu_term. That is an engine-file change (branch first, per
- * project convention), deliberately deferred here in favour of this
- * smaller, frontend-only interim patch.
+ * The spot slider only shifts ONE currency's exposure. Unlike the uniform
+ * vol shift above, this does NOT have a clean exact-linear-scaling
+ * identity, for two reasons, both confirmed by testing against a real
+ * engine re-run at a +5% spot shift on a correlated currency:
  *
- * @param {Object} ccy     — currency entry (from either buckets or cumulative_periods)
+ *   1. OTHER currencies are left completely frozen by `cfar × (1+Δ_spot)`
+ *      applying only to the selected currency — but in reality, shifting
+ *      one currency's exposure changes its cross-covariance contribution
+ *      to every other currency's component too (a real re-run showed two
+ *      unrelated currencies move by roughly −4.5% and −3.0% respectively
+ *      from a single MYR-only spot shift, purely via that cross-currency
+ *      effect — the simulation shows 0% movement for them instead).
+ *   2. Even the SELECTED currency's own `cfar × (1+Δ_spot)` is only exact
+ *      if that currency has zero correlation with the rest of the
+ *      portfolio. With realistic correlation present, the same test showed
+ *      about a 0.8% gap between the formula's prediction and the true
+ *      re-run value at a 5% shift — small, but not zero, contrary to what
+ *      this function's docstring previously (incorrectly) claimed.
+ *
+ * IMPORTANT — this is a SMOOTH, CONTINUOUS approximation, not a buggy one:
+ * unlike the pre-V3.6 vol_term/mu_term formula (which switched to a
+ * structurally different calculation the instant Δ_vol left exactly 0,
+ * producing real discontinuities — jumps of hundreds of percent from a
+ * vol delta of a few thousandths of a percent), `cfar × (1+Δ_spot)` is the
+ * SAME simple multiplicative formula across the ENTIRE slider range,
+ * including Δ_spot = 0. There is no boundary-switching effect here at all.
+ * Tested with shifts as small as ±0.01% around zero (mirroring the
+ * vol-slider continuity test): both the real engine values AND this
+ * formula's predictions move smoothly and proportionally, with no jump
+ * anywhere. The error described above grows gradually and predictably as
+ * |Δ_spot| increases — it does not appear or worsen suddenly near rest.
+ * This is a disclosed, by-design PoC tradeoff (see README's Known
+ * Limitations), not something requiring a fix the way the vol slider did.
+ *
+ * @param {Object} ccy     — currency entry (from cumulative_periods; must
+ *                            include cfar, vol_part, drift_part,
+ *                            net_notional_base, net_direction, currency)
  * @param {number} dSpot   — spot delta for the selected currency (−0.10 to +0.10)
  * @param {number} dVol    — vol delta applied to ALL currencies (−0.25 to +0.25)
  * @param {string} spotCcy — which currency the spot slider currently targets
@@ -1069,33 +1319,31 @@ function applySimulation(ccy, dSpot, dVol, spotCcy) {
     let cfar;
 
     // Step 1: vol shift (applies to all currencies simultaneously).
-    // Uses the decomposed vol_term and mu_term rather than scaling cfar directly,
-    // because mu_term (drift) is independent of the volatility regime.
+    // ONE exact formula for every currency — see this function's docstring,
+    // "V3.6: EXACT VOL SLIDER", for the full derivation and proof.
     if (dVol !== 0) {
-        const newVolTerm = ccy.vol_term * (1 + dVol);
-        if (ccy.net_direction === 'long') {
-            // Long: CFaR_long = vol_term*(1+Δv) − mu_term  [drift helps you]
-            cfar = Math.max(newVolTerm - ccy.mu_term, 0);
-        } else if (ccy.net_direction === 'short') {
-            // Short: CFaR_short = vol_term*(1+Δv) + mu_term  [drift hurts you]
-            cfar = Math.max(newVolTerm + ccy.mu_term, 0);
-        } else {
-            // Flat (net notional ≈ 0, so vol_term/mu_term are both 0 — see
-            // this function's "V3.5 BUG FIX" docstring section above for
-            // the full explanation). INTERIM approximation: scale the
-            // static exact cfar directly, rather than snapping to zero.
-            cfar = Math.max(ccy.cfar * (1 + dVol), 0);
-        }
+        cfar = (1 + dVol) * ccy.vol_part - ccy.drift_part;
     } else {
-        // No vol shift — use the pre-computed exact CFaR from the engine
+        // No vol shift — use the pre-computed exact CFaR from the engine.
+        // (Equivalent to the formula above evaluated at dVol=0, by
+        // construction — using ccy.cfar directly here is simply more
+        // direct than recomputing 1×vol_part − drift_part for the same
+        // result, and avoids reintroducing floating-point rounding noise
+        // at the one delta value users will see most often: rest.)
         cfar = ccy.cfar;
     }
 
     // Step 2: spot shift (applies ONLY to the currently selected currency).
-    // VaR ∝ exposure ∝ spot_rate, so the scaling is exact (not an approximation).
+    // A smooth, continuous approximation — not exact in a correlated
+    // portfolio (this currency's own scaling is only first-order correct,
+    // and every other currency is left frozen rather than reflecting the
+    // small cross-covariance effect a real spot shift would cause). See
+    // this function's docstring, "SPOT SHIFT REMAINS AN APPROXIMATION —
+    // but a SMOOTH one", for the empirically-measured error size and why
+    // this is a disclosed tradeoff rather than a bug.
     if (spotCcy && ccy.currency === spotCcy && dSpot !== 0) {
         netNotional = ccy.net_notional_base * (1 + dSpot);
-        cfar        = Math.max(cfar * (1 + dSpot), 0);
+        cfar        = cfar * (1 + dSpot);
     }
 
     return { netNotional, cfar };
@@ -1105,12 +1353,14 @@ function applySimulation(ccy, dSpot, dVol, spotCcy) {
 /**
  * Re-renders the chart data with current simulation deltas, without
  * recreating the Chart.js instance (uses chart.update('none') for
- * smooth performance, skipping animation). Also re-renders the Component
- * CFaR bar section below the chart, refreshes the Chart Detail Panel (V3.3)
- * with live values for whichever currency it's currently showing, and
- * updates the Period VaR strip to show the sum of simulated component
- * CFaRs as an approximation. (Exact period VaR needs the full covariance
- * matrix — use the pre-computed value in period.period_var for accuracy.)
+ * smooth performance, skipping animation). Also updates the Component
+ * CFaR bar section below the chart IN PLACE (V3.7 — fixed order/scale,
+ * smooth CSS transition; see updateCfarBarsInPlace()), refreshes the
+ * Chart Detail Panel (V3.3) with live values for whichever currency it's
+ * currently showing, and updates the Period VaR strip to show the sum of
+ * simulated component CFaRs — EXACT for a pure vol-regime shift as of
+ * V3.6 (see applySimulation()'s docstring), still an approximation if the
+ * spot slider is also active.
  *
  * Note: this function drives ONLY the Risk Dashboard's chart, CFaR bars,
  * detail panel, and Period VaR strip — it has no effect on the Consolidated
@@ -1143,7 +1393,13 @@ function updateChartSimulation() {
 
     // Keep the Component CFaR bar section below the chart in sync with the
     // same simulation deltas just applied to the notional chart above.
-    renderCfarBarsForPeriod(activePeriodKey);
+    // V3.7: updates each bar's width/value IN PLACE (mutating the existing
+    // DOM elements captured at lock time by renderCfarBarsForPeriod()),
+    // rather than rebuilding the section from scratch on every tick — this
+    // is what keeps bars from re-sorting mid-drag and lets the CSS width
+    // transition actually animate. See updateCfarBarsInPlace()'s docstring
+    // for the full rationale.
+    updateCfarBarsInPlace();
 
     // Keep the Chart Detail Panel showing live values too, for whichever
     // currency it's currently displaying (last hovered, or the index-0
@@ -1155,7 +1411,7 @@ function updateChartSimulation() {
 
     // Update the Period VaR strip to the sum of current component CFaRs.
     //
-    // === WHY THIS IS ALWAYS CONSISTENT WITH THE BARS ===
+    // === WHY THIS IS ALWAYS CONSISTENT WITH THE BARS, AND EXACT FOR VOL-ONLY (V3.6) ===
     //
     // The Period VaR strip always shows the column total of the Component
     // CFaR bars above it (now rendered separately by renderCfarBarsForPeriod,
@@ -1164,10 +1420,14 @@ function updateChartSimulation() {
     //   and their sum equals period.period_var exactly (Euler decomposition theorem).
     //   This is NOT a simple independent sum — the components already encode all
     //   cross-currency correlations via (cov_T @ s)_i in their construction.
-    // At Δ≠0: components are individually scaled by applySimulation(), which does
-    //   not rerun the covariance matrix. Sum is an approximation (conservative —
-    //   overstates risk) because cross-currency correlations are not recomputed.
-    //   Exact result requires re-running Calculate with a changed vol assumption.
+    // At Δ_vol≠0, Δ_spot=0: the sum is EXACT, not an approximation — it equals
+    //   what a full server-side re-run at that vol level would produce. See
+    //   exposure_engine.py's _compute_component_vars_by_currency() docstring
+    //   for the proof, and applySimulation()'s docstring for the summary.
+    // At Δ_spot≠0 (with or without a vol shift): the sum remains an approximation,
+    //   since shifting one currency's exposure changes its cross-covariance terms
+    //   with every other currency too — re-running Calculate gives the exact
+    //   figure for a genuinely different spot-rate assumption.
     const simTotal = simulated.reduce((acc, s) => acc + s.cfar, 0);
     document.getElementById('dashBiCfar').textContent =
         `${dashboardData.base_ccy} ${fmtNum(simTotal)}`;
@@ -1298,7 +1558,7 @@ function updatePortfolioSliderDisplays() {
  * identical min(Tᵢ,Tⱼ) covariance method over the identical full position
  * list (see exposure_engine.py's CUMULATIVE_PERIOD_DEFINITIONS docstring
  * for the guarantee, and dashboard_engine.py's module docstring). This
- * means the 'all' period's per-currency vol_term/mu_term/cfar values —
+ * means the 'all' period's per-currency vol_part/drift_part/cfar values —
  * already sent to the frontend for the Risk Dashboard's "All" filter
  * option — are equally valid inputs for stressing the Consolidated VaR
  * figure. No new Python computation was required to add this feature:
@@ -1306,17 +1566,18 @@ function updatePortfolioSliderDisplays() {
  * a second, independent set of slider state (portfolioDeltaSpot /
  * portfolioDeltaVol / portfolioActiveSpotCcy) targeting the 'all' period.
  *
- * === WHY THIS IS AN APPROXIMATION (identical caveat to the Period VaR strip) ===
+ * === ACCURACY (identical to the Period VaR strip — see applySimulation()) ===
  *
- * Each currency's Component CFaR is scaled independently and summed —
- * cross-currency correlations are NOT recomputed when a slider moves
- * (that would require the full n×n covariance matrix server-side). At
+ * Each currency's Component CFaR is scaled independently and summed. At
  * Δ=0 the sum is exact and equals the Consolidated Portfolio VaR figure
- * shown statically above this panel (Euler decomposition theorem). At
- * Δ≠0 the sum is a conservative approximation (slightly overstates risk).
- * This is the exact same method and the exact same caveat as
- * updateChartSimulation()'s Period VaR strip update — just a second,
- * independent instance of it targeting this card instead.
+ * shown statically above this panel (Euler decomposition theorem). For a
+ * PURE vol-regime shift (Δ_vol≠0, Δ_spot=0), the sum is now EXACT as of
+ * V3.6 — not an approximation — see applySimulation()'s docstring for the
+ * proof. If the spot slider is also active, the sum remains an
+ * approximation, for the same reason described there ("SPOT SHIFT REMAINS
+ * AN APPROXIMATION"). This is the exact same method and the exact same
+ * accuracy profile as updateChartSimulation()'s Period VaR strip update —
+ * just a second, independent instance of it targeting this card instead.
  */
 function updatePortfolioSimulation() {
     const elVar = document.getElementById('portfolioStressedVaR');

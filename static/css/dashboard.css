@@ -612,11 +612,31 @@ textarea {
   /* Matches the same bar colours used for the notional chart above and
      for the Hedge Effectiveness table's direction badges, so a currency
      reads as the same colour everywhere on the page — not a new palette. */
+  /* V3.7: this transition is now functionally meaningful. Previously,
+     dashboard.js rebuilt this section's entire innerHTML on every slider
+     tick, destroying and recreating this element every time — a CSS
+     transition only animates an EXISTING element's property change, so it
+     had nothing to animate from and never actually fired. As of V3.7,
+     updateCfarBarsInPlace() mutates this element's width directly instead
+     of rebuilding it, so width changes now smoothly interpolate via this
+     rule rather than snapping instantly. See dashboard.js's
+     updateCfarBarsInPlace() docstring for the full rationale. */
   transition:    width 0.4s ease;
 }
-.cfar-bar-fill.long  { background: rgba(74, 222, 128, 0.70); }   /* green */
-.cfar-bar-fill.short { background: rgba(248, 113, 113, 0.70); }  /* red   */
-.cfar-bar-fill.flat  { background: rgba(107, 114, 128, 0.50); }  /* grey  */
+.cfar-bar-fill.long  { background: rgba(74,  222, 128, 0.70); }  /* green  — net long  (receivable) */
+.cfar-bar-fill.short { background: rgba(248, 113, 113, 0.70); }  /* red    — net short (payable)    */
+/* Amber for flat rather than grey: a flat currency has zero NET notional in this
+   window (fully netted receivables vs payables) but can still carry significant
+   Component CFaR through cross-horizon covariance residuals (the min(Tᵢ,Tⱼ)
+   formula keeps risk from longer-dated positions alive even when net notional
+   cancels). Grey reads as "inactive / nothing here" — misleading when the
+   amber bar may represent the largest single CFaR on the chart (e.g. MYR with
+   SGD 52,710 CFaR despite zero net notional). Amber (--warn) says "caution,
+   look at this" while still clearly differing from directional long/short.
+   NOTE: the notional chart's flat bar colour and the hedge-table's .dash-dir-badge.flat
+   remain grey — those convey position DIRECTION (net flat = zero), not risk magnitude,
+   so grey is correct and intentional there. Do not change those to match this. */
+.cfar-bar-fill.flat  { background: rgba(251, 191, 36,  0.70); }  /* amber  — flat (cross-horizon residual risk) */
 .cfar-bar-value {
   font-family:          var(--mono);
   font-size:            13px;
@@ -673,6 +693,41 @@ textarea {
   border-radius: 8px;
   padding:       24px 28px;
   margin-bottom: 32px;
+
+  /* ── STICKY BEHAVIOUR (V3.8) ──────────────────────────────
+     The panel sticks to the BOTTOM of the viewport so a user
+     can scroll up to see the notional chart and Component CFaR
+     bars while keeping the sliders reachable at all times.
+
+     How it works with position:sticky + bottom:0:
+       - While the panel is within the viewport the element
+         renders in its normal flow position (no change).
+       - When the user scrolls UP toward the chart, CSS prevents
+         the panel from going below the viewport's bottom edge —
+         it pins there, staying visible while the chart above
+         comes into view.
+       - When the user scrolls DOWN past the hedge table, the
+         panel unsticks and scrolls away normally — sticky only
+         holds within the containing block's scroll range.
+
+     Prerequisites satisfied:
+       - No ancestor has overflow:hidden or overflow:auto on the
+         main document axis (checked: .shell uses overflow:visible).
+       - #results-dashboard is display:none until /calculate fires,
+         so sticky never activates on a blank or pre-calculation page.
+
+     z-index 20 clears the chart's canvas (no explicit z-index)
+     and the stat cards (no z-index) without conflicting with any
+     modal or tooltip layer (those use z-index 100+). Adjust
+     upward only if a new overlay layer is added in future.
+
+     box-shadow direction: upward spread (negative Y offset) to
+     visually "lift" the panel off content scrolling beneath it,
+     consistent with the mental model of a docked control bar. */
+  position:      sticky;
+  bottom:        0;
+  z-index:       20;
+  box-shadow:    0 -6px 32px rgba(0, 0, 0, 0.50);
 }
 
 .sim-panel h3 {
@@ -692,6 +747,15 @@ textarea {
 
 @media (max-width: 640px) {
   .sim-grid { grid-template-columns: 1fr; }
+
+  /* Disable sticky on narrow screens — the single-column stacked layout is
+     too tall (~280px) to be a useful sticky footer: it would eat most of
+     the viewport and leave almost no room to see the chart above it.
+     Normal scroll flow is the right experience on mobile. */
+  .sim-panel {
+    position:   static;
+    box-shadow: none;  /* remove the upward lift shadow — not needed in flow */
+  }
 }
 
 .sim-block h4 {
