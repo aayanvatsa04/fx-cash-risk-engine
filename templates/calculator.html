@@ -921,6 +921,98 @@
       color: var(--muted);
     }
   }
+
+  /* ============================================================
+     CASH SPOT RATE SENSITIVITY CARD (V3.8)
+     Simple scenario table above Cash Book Risk showing how each
+     cash holding's base-currency equivalent changes under a fixed
+     % spot rate move. No covariance, no volatility assumptions.
+
+     The outer container reuses .var-card for consistent card styling
+     (gradient top border, border-radius, padding). The inner
+     .sens-table-wrap creates its own horizontal scroll context so
+     the 10-column table never causes overflow at the card level —
+     .var-card's overflow:hidden only clips content that genuinely
+     escapes the card boundary, not internal scroll containers.
+
+     Future developers: add new scenarios by extending the SCENARIOS
+     array in renderSensitivity() below — no CSS changes needed.
+  ============================================================ */
+
+  /* Brief explainer above the table */
+  .sens-intro {
+    font-size:   12px;
+    color:       var(--muted);
+    margin-bottom: 14px;
+    line-height: 1.5;
+  }
+
+  /* Horizontally scrollable wrapper — prevents card-level overflow while
+     keeping the table fully navigable on mobile (swipe to scroll). */
+  .sens-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;  /* smooth momentum scroll on iOS */
+    scrollbar-width: thin;
+    scrollbar-color: var(--border2) transparent;
+  }
+  .sens-table-wrap::-webkit-scrollbar       { height: 4px; }
+  .sens-table-wrap::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+  .sens-table-wrap::-webkit-scrollbar-track { background: transparent; }
+
+  /* Table — min-width triggers scroll before columns become too narrow to read */
+  .sens-table {
+    width:            100%;
+    min-width:        580px;   /* scroll kicks in below this — keeps columns readable */
+    border-collapse:  collapse;
+    font-family:      var(--mono);
+    font-size:        12px;
+  }
+
+  /* Header row */
+  .sens-table th {
+    padding:        5px 10px;
+    font-size:      10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space:    nowrap;
+    border-bottom:  1px solid var(--border);
+  }
+  /* Fixed-label headers (Currency / Balance / Current) left-aligned, muted */
+  .sens-th-label { color: var(--muted);  text-align: left;  }
+  /* Scenario headers colour-coded so the direction is obvious at a glance */
+  .sens-th-neg   { color: var(--danger); text-align: right; }  /* loss scenarios */
+  .sens-th-pos   { color: var(--accent); text-align: right; }  /* gain scenarios */
+  .sens-th-mid   { color: var(--muted);  text-align: right; }  /* no change      */
+
+  /* Data cells */
+  .sens-table td {
+    padding:              7px 10px;
+    white-space:          nowrap;
+    border-bottom:        1px solid var(--border);
+    font-variant-numeric: tabular-nums;
+  }
+  /* No border on the last row — the card padding provides enough visual separation */
+  .sens-table tbody tr:last-child td { border-bottom: none; }
+
+  /* Fixed columns */
+  .sens-td-ccy { text-align: left;  font-weight: 500; color: var(--text);  }
+  .sens-td-bal { text-align: left;  color: var(--muted); }
+  .sens-td-val { text-align: left;  color: var(--text);  }
+
+  /* Scenario value cells — mirror the green/red palette used across the app */
+  .sens-cell-gain { text-align: right; color: var(--accent); }  /* FCY appreciated */
+  .sens-cell-loss { text-align: right; color: var(--danger); }  /* FCY depreciated */
+  .sens-cell-flat { text-align: right; color: var(--muted);  }  /* no change       */
+
+  /* One-line key below the table */
+  .sens-footer {
+    font-size:   10px;
+    color:       var(--muted);
+    margin-top:  12px;
+    padding-top: 10px;
+    border-top:  1px solid var(--border);
+    line-height: 1.5;
+  }
 </style>
 </head>
 <body>
@@ -1064,6 +1156,24 @@
        shown/hidden independently via getElementById), so reordering
        them here does not affect how any of them render or calculate.
        ══════════════════════════════════════════════════════════ -->
+  <!-- ── CASH SPOT RATE SENSITIVITY (V3.8) ──
+       Simple scenario table showing how each cash holding's base-currency
+       equivalent changes under a fixed % spot rate shift. Intentionally
+       simpler than the parametric VaR below — no covariance, volatility,
+       or confidence level — answering the intuitive CFO question:
+       "if USD moves 10% against SGD, what do I gain or lose?"
+
+       Rendered by renderSensitivity() which reuses spot_risk.positions
+       data already present in the /calculate response — no new backend
+       call needed. The card body (#sensitivityCard) starts empty and is
+       populated via innerHTML on every renderResults() call.
+
+       Hidden at page load, shown when cash positions exist. -->
+  <div id="results-sensitivity" style="display:none">
+    <div class="section-title" style="margin-top:32px">Cash Spot Rate Sensitivity</div>
+    <div class="var-card" id="sensitivityCard"></div>
+  </div>
+
   <!-- ── CASH BOOK RISK ── -->
   <div id="results-s1" style="display:none">
     <div class="section-title" style="margin-top:32px" id="spotSection">
@@ -1878,6 +1988,7 @@ async function calculate() {
   document.getElementById('results-s2').style.display = 'none';
   document.getElementById('results-consolidated').style.display = 'none';
   document.getElementById('results-dashboard').style.display = 'none';
+  document.getElementById('results-sensitivity').style.display = 'none';
 
   try {
     const resp = await fetch('/calculate', {
@@ -1909,6 +2020,144 @@ async function calculate() {
     setStatus('');
     showError(`Error: ${err.message}`);
   }
+}
+
+// =============================================================================
+// CASH SPOT RATE SENSITIVITY (V3.8)
+// =============================================================================
+
+/**
+ * fmtSensChange(n)
+ *
+ * Formats a signed sensitivity change value for display in the scenario table.
+ * Returns an explicit "+" prefix for gains, compact K/M abbreviations for large
+ * values, and "—" for zero.
+ *
+ * Same negative-zero guard as fmt() and fmtC() — see their docstrings for the
+ * full explanation of why the < 0.5 floor is necessary.
+ *
+ * Examples: 258460 → "+258.5K"   -129230 → "-129.2K"   0 → "—"
+ */
+function fmtSensChange(n) {
+  if (Math.abs(n) < 0.5) return '—';
+  const sign = n > 0 ? '+' : '-';
+  const abs  = Math.abs(n);
+  if (abs >= 1e6) return sign + (abs / 1e6).toFixed(2) + 'M';
+  if (abs >= 1e3) return sign + (abs / 1e3).toFixed(1) + 'K';
+  return sign + abs.toFixed(0);
+}
+
+/**
+ * renderSensitivity(data)
+ *
+ * Renders the Cash Spot Rate Sensitivity card above Cash Book Risk.
+ *
+ * PURPOSE
+ *   Gives a simple, covariance-free answer to the intuitive CFO question:
+ *   "If USD moves 10% against SGD, what do I gain or lose on my cash
+ *   holdings?" This is deliberately simpler than the parametric VaR below
+ *   — no volatility lookback, no confidence level, no correlation matrix.
+ *
+ * MATH
+ *   change_base = exposure_base × (scenario_pct / 100)
+ *
+ *   where exposure_base = balance_fcy × spot_rate, already computed
+ *   server-side and returned in spot_risk.positions. No new backend call
+ *   is needed — all required fields are present in the existing response.
+ *
+ *   For a cash (long) position:
+ *     - Positive % → FCY appreciated vs base → gain in base ccy (green)
+ *     - Negative % → FCY depreciated vs base → loss in base ccy (red)
+ *
+ * SCOPE
+ *   Cash positions only (spot_risk.positions). Forward exposures are
+ *   excluded — they have their own directional risk (payable vs receivable)
+ *   that would require additional sign logic; the parametric VaR in the
+ *   Bucketed Risk Detail section already handles those.
+ *
+ * SCENARIOS
+ *   Seven fixed points: ±20%, ±10%, ±5%, and No Change (0%).
+ *   To add or remove scenarios, edit the SCENARIOS array below — no CSS or
+ *   HTML changes are needed; the table builds itself from that array.
+ *
+ * @param {Object} data - Full /calculate response (same object as renderResults)
+ */
+function renderSensitivity(data) {
+  const { base_ccy, spot_risk } = data;
+  const section = document.getElementById('results-sensitivity');
+
+  // Only show when cash positions exist — if the user only entered exposures
+  // (no cash), there is nothing to display here.
+  if (!spot_risk?.positions?.length) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = 'block';
+
+  // Scenario percentages — symmetric around zero.
+  // Negative = FCY depreciation (loss for long cash).
+  // Positive = FCY appreciation (gain for long cash).
+  const SCENARIOS = [-20, -10, -5, 0, 5, 10, 20];
+
+  // ── Build table header ───────────────────────────────────────────────────
+  // Scenario headers are colour-coded so the loss/gain direction is
+  // obvious before reading any numbers (red = potential loss, green = gain).
+  const headerCells = SCENARIOS.map(s => {
+    if (s === 0) return `<th class="sens-th-mid">No Chg</th>`;
+    const cls   = s < 0 ? 'sens-th-neg' : 'sens-th-pos';
+    const label = (s > 0 ? '+' : '') + s + '%';
+    return `<th class="${cls}">${label}</th>`;
+  }).join('');
+
+  // ── Build table rows — one row per cash position ─────────────────────────
+  const rows = spot_risk.positions.map(p => {
+    const dataCells = SCENARIOS.map(s => {
+      if (s === 0) return `<td class="sens-cell-flat">—</td>`;
+
+      // Simple spot-rate arithmetic — the ONLY formula used in this section.
+      // change_base is the delta in base-currency equivalent value:
+      //   > 0 when FCY appreciated (rate moved up) — a GAIN for cash holders
+      //   < 0 when FCY depreciated (rate moved down) — a LOSS for cash holders
+      const change = p.exposure_base * (s / 100);
+      const cls    = change >= 0 ? 'sens-cell-gain' : 'sens-cell-loss';
+      return `<td class="${cls}">${fmtSensChange(change)}</td>`;
+    }).join('');
+
+    return `
+      <tr>
+        <td class="sens-td-ccy">${p.currency}</td>
+        <td class="sens-td-bal">${p.currency} ${fmtC(p.balance)}</td>
+        <td class="sens-td-val">${base_ccy} ${fmtC(p.exposure_base)}</td>
+        ${dataCells}
+      </tr>`;
+  }).join('');
+
+  // ── Assemble and inject ───────────────────────────────────────────────────
+  document.getElementById('sensitivityCard').innerHTML = `
+    <p class="sens-intro">
+      Change in <strong>${base_ccy}</strong> equivalent if each cash
+      holding's spot rate moves by the stated percentage. Each currency
+      shown independently — no correlation or volatility assumptions.
+      For probability-weighted risk, see <em>Cash Book Risk</em> below.
+    </p>
+    <div class="sens-table-wrap">
+      <table class="sens-table">
+        <thead>
+          <tr>
+            <th class="sens-th-label">Currency</th>
+            <th class="sens-th-label">Balance</th>
+            <th class="sens-th-label">Current (${base_ccy})</th>
+            ${headerCells}
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <p class="sens-footer">
+      + = ${base_ccy} gain (FCY appreciated vs ${base_ccy}, spot rate up) &nbsp;·&nbsp;
+      − = ${base_ccy} loss (FCY depreciated vs ${base_ccy}, spot rate down) &nbsp;·&nbsp;
+      Figures show the <em>change</em> in ${base_ccy} equivalent, not the new total value
+    </p>`;
 }
 
 // =============================================================================
@@ -2269,6 +2518,8 @@ function renderResults(data) {
   } else {
     document.getElementById('results-consolidated').style.display = 'none';
   }
+
+  renderSensitivity(data);   // Cash Spot Rate Sensitivity card (V3.8)
 
   document.getElementById('results-s1').style.display = 'block';
   document.getElementById('results-s2').style.display = 'block';
