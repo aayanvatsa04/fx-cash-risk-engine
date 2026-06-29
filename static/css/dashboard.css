@@ -693,41 +693,6 @@ textarea {
   border-radius: 8px;
   padding:       24px 28px;
   margin-bottom: 32px;
-
-  /* ── STICKY BEHAVIOUR (V3.8) ──────────────────────────────
-     The panel sticks to the BOTTOM of the viewport so a user
-     can scroll up to see the notional chart and Component CFaR
-     bars while keeping the sliders reachable at all times.
-
-     How it works with position:sticky + bottom:0:
-       - While the panel is within the viewport the element
-         renders in its normal flow position (no change).
-       - When the user scrolls UP toward the chart, CSS prevents
-         the panel from going below the viewport's bottom edge —
-         it pins there, staying visible while the chart above
-         comes into view.
-       - When the user scrolls DOWN past the hedge table, the
-         panel unsticks and scrolls away normally — sticky only
-         holds within the containing block's scroll range.
-
-     Prerequisites satisfied:
-       - No ancestor has overflow:hidden or overflow:auto on the
-         main document axis (checked: .shell uses overflow:visible).
-       - #results-dashboard is display:none until /calculate fires,
-         so sticky never activates on a blank or pre-calculation page.
-
-     z-index 20 clears the chart's canvas (no explicit z-index)
-     and the stat cards (no z-index) without conflicting with any
-     modal or tooltip layer (those use z-index 100+). Adjust
-     upward only if a new overlay layer is added in future.
-
-     box-shadow direction: upward spread (negative Y offset) to
-     visually "lift" the panel off content scrolling beneath it,
-     consistent with the mental model of a docked control bar. */
-  position:      sticky;
-  bottom:        0;
-  z-index:       20;
-  box-shadow:    0 -6px 32px rgba(0, 0, 0, 0.50);
 }
 
 .sim-panel h3 {
@@ -747,15 +712,6 @@ textarea {
 
 @media (max-width: 640px) {
   .sim-grid { grid-template-columns: 1fr; }
-
-  /* Disable sticky on narrow screens — the single-column stacked layout is
-     too tall (~280px) to be a useful sticky footer: it would eat most of
-     the viewport and leave almost no room to see the chart above it.
-     Normal scroll flow is the right experience on mobile. */
-  .sim-panel {
-    position:   static;
-    box-shadow: none;  /* remove the upward lift shadow — not needed in flow */
-  }
 }
 
 .sim-block h4 {
