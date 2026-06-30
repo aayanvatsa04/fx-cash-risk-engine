@@ -20,24 +20,30 @@ benefit computation, and cross-currency covariance adjustment.
 Everything lives on a single unified page. The user enters their portfolio,
 clicks Calculate once, and sees:
 
-1. **Cash Book Risk** — standalone VaR on current cash holdings at user-
+1. **Cash Spot Rate Sensitivity** — a simple scenario table showing how each
+   cash holding's base-currency equivalent changes under fixed ±% spot rate
+   shifts, with no covariance, volatility, or confidence level involved.
+   Appears first, answering the intuitive "if USD moves 10% against SGD,
+   what do I gain or lose?" question before the more technical parametric
+   VaR figure right below it.
+2. **Cash Book Risk** — standalone VaR on current cash holdings at user-
    specified T, with per-currency breakdown and covariance-adjusted total.
-   Appears first, directly below its own Cash VaR Horizon dropdown, so the
+   Appears directly below its own Cash VaR Horizon dropdown, so the
    one input that affects this card sits right next to the card it affects.
-2. **Consolidated Portfolio VaR** — single portfolio number using the exact
+3. **Consolidated Portfolio VaR** — single portfolio number using the exact
    min(Ti,Tj) cross-horizon covariance formula across all positions, with
    its own independent Portfolio Scenario sliders for a live "what-if"
    stressed figure on the same card.
-3. **Bucketed Risk Detail** — full per-bucket technical breakdown: individual
+4. **Bucketed Risk Detail** — full per-bucket technical breakdown: individual
    positions, net VaRs, natural hedge benefit, and diversification benefit
    per bucket. Analyst-level detail.
-4. **Risk Dashboard** — headline stat cards, a net notional bar chart paired
+5. **Risk Dashboard** — headline stat cards, a net notional bar chart paired
    with a separate Component CFaR bar section below it, cumulative period
    filter, its own independent scenario simulation sliders, and hedge
    effectiveness table. Appears last, since it summarises numbers already
-   computed in the three sections above rather than introducing new ones.
+   computed in the four sections above rather than introducing new ones.
 
-All four sections are driven by a single API response from one Calculate click.
+All five sections are driven by a single API response from one Calculate click.
 
 ---
 
@@ -47,19 +53,20 @@ All four sections are driven by a single API response from one Calculate click.
 ① Global Settings + inputs (cash positions, horizon, future exposures)
 ② Calculate VaR button
    ── results appear below ──
-③ Cash Book Risk (standalone cash VaR at user-specified T)
-④ Consolidated Portfolio VaR (full portfolio, exact individual-T covariance)
+③ Cash Spot Rate Sensitivity (simple % scenario table on cash, no covariance/VaR)
+④ Cash Book Risk (standalone cash VaR at user-specified T)
+⑤ Consolidated Portfolio VaR (full portfolio, exact individual-T covariance)
    └── Portfolio Scenario sliders (±10% spot, ±25% vol) → Stressed Portfolio VaR
-⑤ Bucketed Risk Detail (per-bucket netting, attribution, diversification)
-⑥ RISK DASHBOARD (summary view, shown last)
+⑥ Bucketed Risk Detail (per-bucket netting, attribution, diversification)
+⑦ RISK DASHBOARD (summary view, shown last)
    ├── Stat cards: Portfolio VaR · Spot Book VaR · Gross Standalone · Risk Reduction
    ├── Net Cashflow Exposure bar chart (net notional, labelled with its own value)
    ├── Component CFaR bars (separate horizontal bars, sorted by risk magnitude)
-   ├── Scenario Simulation sliders (±10% spot, ±25% vol) — independent of ④'s sliders
+   ├── Scenario Simulation sliders (±10% spot, ±25% vol) — independent of ⑤'s sliders
    └── Natural Hedge Effectiveness table (per currency per bucket)
-⑦ Model Notes & Limitations — always visible, independent of the Calculate
+⑧ Model Notes & Limitations — always visible, independent of the Calculate
    button (renders on page load, before any input is entered; sections
-   ③–⑥ above are hidden until the first successful Calculate response)
+   ③–⑦ above are hidden until the first successful Calculate response)
    (formula, confidence-level meaning, output-section definitions,
     Component CFaR, Gross Standalone Risk scope, market data sourcing,
     Known Limitations table)
@@ -68,6 +75,20 @@ All four sections are driven by a single API response from one Calculate click.
 ---
 
 ## Features
+
+- **Cash Spot Rate Sensitivity (V3.8):** A simple scenario table showing how
+  each cash holding's base-currency equivalent changes under seven fixed spot
+  rate scenarios (±20%, ±10%, ±5%, No Change) — deliberately simpler than the
+  parametric VaR below it: no covariance, volatility, or confidence level
+  involved. Answers the intuitive CFO question "if USD moves 10% against
+  SGD, what do I gain or lose?" before the more technical Cash Book Risk
+  figure. Cash positions only — forward exposures are excluded, since their
+  payable/receivable direction needs additional sign logic already handled
+  by the parametric VaR in Bucketed Risk Detail. Rendered entirely by
+  `renderSensitivity()` in `calculator.html`, which reuses `spot_risk.positions`
+  data already present in the `/calculate` response — no backend, engine, or
+  `dashboard_engine.py` changes were required. Hidden at page load; shown
+  only when cash positions exist.
 
 - **Cash Book Risk:** Standalone parametric VaR on cash holdings at user-
   specified T. Per-currency breakdown. Portfolio total is covariance-adjusted
@@ -509,6 +530,7 @@ consistent with the old note's behaviour.
 | CFaR | Notional of future cash flow | Bucketed Risk Detail |
 | Component CFaR | Marginal covariance contribution per currency | Dashboard Component CFaR bars |
 | Portfolio VaR | All positions combined | Consolidated + period strip |
+| *(none — not a VaR/CFaR figure)* | Raw spot-rate scenario arithmetic, no probability or confidence level | Cash Spot Rate Sensitivity table |
 
 ### Gross Standalone Risk — Scope
 
@@ -692,6 +714,7 @@ question of where a new row goes.
 | Vol slider no longer snaps a flat currency's Component CFaR to exactly 0 on any non-zero move (V3.5 interim fix) — `applySimulation()`'s flat-direction branch now scales the static exact `cfar` by `(1+Δvol)` instead of hardcoding `cfar = 0` | Caught via screenshot: a −0.1% vol nudge sent MYR's Component CFaR from SGD 55,406 straight to SGD 0. Root cause was two-layered — an explicit `else { cfar = 0 }` branch for flat currencies, AND the deeper fact that `vol_term`/`mu_term` are both precomputed server-side as `net_notional_base × (something)`, which is always 0 for a flat (net-zero-notional) currency regardless of how large its real cross-horizon-residual Component CFaR is. This interim patch is frontend-only (`dashboard.js`, `calculator.html` sim-note copy) and is an approximation, not an exact fix — it's tracked as a remaining item in Known Limitations, with the exact fix (a provable linear-scaling identity under uniform vol shifts) requiring a backend change to expose a proper vol-part/drift-part decomposition per currency, deliberately deferred per the user's request to scope it as a separate, future, branch-worthy change |
 | Vol slider made fully EXACT, not just continuous (V3.6) — superseded the V3.5 interim patch entirely. `net_notional_base`-derived `vol_term`/`mu_term` removed completely; replaced with `vol_part`/`drift_part`, computed in `exposure_engine.py`'s `_compute_component_vars_by_currency()` from the same per-position arrays that produce the exact static Component CFaR. `applySimulation()` is now ONE formula for every currency (long, short, or flat) — `new_cfar = (1+Δvol)×vol_part − drift_part` — with no direction branching and no zero-floor (negative components are meaningful, not errors) | User pushed back on whether a 0.1% vol move should really change numbers as much as it did, even after the V3.5 patch — testing confirmed it was much worse than the flat-currency case alone: real currencies in a real portfolio showed jumps of several hundred percent (one case 4,070%) and even sign flips from a vol delta of a few thousandths of a percent, because the old `vol_term`/`mu_term` was a standalone single-position-style estimate that completely ignored cross-currency covariance — fundamentally a different quantity from the exact, marginal Component CFaR it was meant to approximate. The fix isn't a better approximation; it's mathematically exact, provable from the covariance matrix being homogeneous of degree 2 in σ under a uniform vol-regime shift (see `_compute_component_vars_by_currency`'s docstring for the full derivation). Verified empirically, not just symbolically: every currency's simulated value at +25% vol matched a full engine re-run to within floating-point rounding, including MYR's cross-horizon residual case, with zero special-casing required in the new code. Branch-worthy (`exposure_engine.py`, `dashboard_engine.py` both touched) — `dashboard.js` and `calculator.html` updated to match; `effective_T` retained as a display-only field (Chart Detail Panel), no longer feeding any simulation math. The spot slider's approximation (shifting one currency's exposure doesn't have the same exact-scaling identity) is unchanged and remains disclosed in Known Limitations |
 | Component CFaR bars no longer re-sort or rebuild on every slider tick (V3.7) — `renderCfarBarsForPeriod()` now locks display order and the scaling denominator ONCE per period render (a fresh Calculate or a period-dropdown change, both of which reset sliders to 0 first), and a new `updateCfarBarsInPlace()` handles every subsequent slider tick by mutating each row's existing width/value directly instead of rebuilding the section | Even after V3.6 made the underlying numbers exact, the bars still visually behaved badly: `renderCfarBarsForPeriod()` was being called again on every tick, re-sorting by current `\|CFaR\|` (letting two close-magnitude currencies visually swap rank from a small real change) and rebuilding the section's entire `innerHTML` every time (which silently defeated the `.cfar-bar-fill` CSS width transition — a transition only animates an EXISTING element's property change, and destroying/recreating every element every tick gave the browser nothing to animate from, so bars snapped instead of sliding). Verified empirically with a deliberately-engineered two-currency scenario where one genuinely overtakes the other in magnitude under a vol shift: order stayed locked at its Δ=0 baseline throughout the full slider range, and the same DOM nodes persisted across every tick (confirmed via object identity), proving the CSS transition can now actually animate. Frontend-only (`dashboard.js`, plus a `dashboard.css` comment update) — no Python changes. Also removed an unnecessary `CSS.escape()` call added during this work (currency codes are always simple 3-letter uppercase ISO codes from the backend, never arbitrary/user-controlled strings, so escaping added a Web API dependency for no real benefit) |
+| New Cash Spot Rate Sensitivity card added above Cash Book Risk (V3.8) — `renderSensitivity()` and `fmtSensChange()` in `calculator.html` render a simple ±20/±10/±5/No-Change scenario table per cash currency | Mentor feedback: stakeholders wanted an immediate, intuitive "what if the rate moves X%" answer ahead of the more technical parametric VaR figure, without needing to understand confidence levels or covariance first. Implemented as pure spot-rate arithmetic (`change_base = exposure_base × (scenario_pct / 100)`) reusing `exposure_base` already present in `spot_risk.positions` — no backend, engine, or `dashboard_engine.py` changes required. Scoped to cash positions only; forward exposures are excluded since their payable/receivable sign logic is already handled by the parametric VaR in Bucketed Risk Detail. Frontend-only — same negative-zero formatting guard as `fmt()`/`fmtC()` reused via the new `fmtSensChange()` |
 
 ---
 
