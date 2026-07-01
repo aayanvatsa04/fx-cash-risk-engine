@@ -8,20 +8,26 @@ to dashboard_engine.py.
 
 === ROUTES ===
 
-    GET  /           → Serves the single unified page (templates/calculator.html)
-    POST /calculate  → V3 JSON API: full VaR engine output + dashboard chart data
+    GET  /                  → Serves the single unified page (templates/calculator.html)
+    POST /calculate         → V3 JSON API: full VaR engine output + dashboard chart data
+    POST /recommend_hedges  → V3.8 JSON API: ranked forward-hedge recommendations
+                               that reduce Consolidated Portfolio VaR
 
 === UNIFIED PAGE DESIGN ===
 
 The calculator and dashboard are one page. The user enters their portfolio
 once, clicks Calculate, and sees:
-  1. Detailed three-section engine output (spot book, bucketed, gross attribution,
-     consolidated VaR) — driven by the raw engine result
-  2. Risk dashboard (bar chart, sliders, hedge effectiveness table) — driven by
-     the dashboard key in the same response, formatted by dashboard_engine.py
+  1. Cash Spot Rate Sensitivity — simple scenario table on cash holdings
+  2. Cash Book Risk — standalone cash VaR at user-specified T
+  3. Consolidated Portfolio VaR — full portfolio with Portfolio Scenario sliders
+  4. Hedge Recommendations — ranked forward contracts to reduce Portfolio VaR,
+     triggered by a separate "Get Hedge Recommendations" button (POST /recommend_hedges)
+  5. Bucketed Risk Detail — per-bucket netting, attribution, diversification
+  6. Risk Dashboard — summary stat cards, chart, simulation sliders, hedge table
 
 There is no separate /dashboard page or /dashboard_data endpoint. One form
-submission drives everything.
+submission drives sections 1–3 and 5–6; section 4 is triggered separately
+on demand (because it requires multiple engine re-runs and is more expensive).
 
 === DEPENDENCY CHAIN (strictly one-directional) ===
 
@@ -58,7 +64,7 @@ HOW TO RUN:
 """
 
 from flask import Flask, request, jsonify, render_template
-from exposure_engine import calculate_fx_var
+from exposure_engine import calculate_fx_var, recommend_hedges
 from dashboard_engine import prepare_dashboard_data
 
 app = Flask(__name__)
@@ -235,6 +241,96 @@ def calculate():
         var_result['dashboard'] = prepare_dashboard_data(var_result)
 
         return jsonify(var_result)
+
+    except Exception as e:
+        return jsonify({'error': f'Engine error: {str(e)}'}), 500
+
+
+@app.route('/recommend_hedges', methods=['POST'])
+def recommend_hedges_route():
+    """
+    V3.8 Hedge Recommendation API endpoint. Identifies which forward contracts
+    would most reduce Consolidated Portfolio VaR, returned as a ranked list
+    the treasurer can act on.
+
+    === WHY A SEPARATE ENDPOINT? ===
+
+    /recommend_hedges is intentionally NOT merged into /calculate:
+      1. It is more expensive — it calls calculate_consolidated_portfolio_var
+         once per hedge candidate (O(N) engine re-runs where N = candidate count),
+         whereas /calculate runs a fixed, bounded set of computations.
+      2. It is only needed when the user explicitly wants hedge suggestions —
+         not on every Calculate click.
+      3. Keeping it separate means no change to the existing /calculate contract,
+         so any external callers of /calculate (future API users, tests) are
+         completely unaffected by V3.8.
+
+    === INPUT ===
+
+    Accepts the same JSON body as /calculate (validated by the shared
+    _parse_and_validate_request helper). The cash_horizon field is accepted
+    but has no effect on recommendations — hedge rankings always use
+    CASH_CONSOLIDATED_T_DAYS (10 trading days) for cash, consistent with
+    how Consolidated Portfolio VaR treats cash throughout the rest of the app.
+
+    === OUTPUT ===
+
+    {
+        'base_ccy':                   str,   — home currency
+        'baseline_var':               float, — Portfolio VaR before any hedges
+        'recommendations': [          — one entry per (currency, bucket) candidate,
+                                         ranked by risk-reduction impact
+            {
+                'rank':                     int,
+                'currency':                 str,
+                'bucket_num':               int,
+                'bucket_label':             str,
+                'bucket_midpoint_t':        int,
+                'net_notional_fcy':         float,
+                'net_notional_base':        float,
+                'component_cfar_baseline':  float,
+                'hedge_direction':          str,   — 'payable' or 'receivable'
+                'hedge_amount_fcy':         float,
+                'hedge_settlement_date':    str,   — 'YYYY-MM-DD'
+                'hedge_settlement_t':       int,
+                'spot_rate':                float,
+                'portfolio_var_before':     float,
+                'portfolio_var_after':      float,
+                'marginal_reduction_abs':   float,
+                'marginal_reduction_pct':   float,
+                'cumulative_reduction_abs': float,
+                'cumulative_reduction_pct': float,
+            }
+        ],
+        'fully_hedged_var':            float,
+        'fully_hedged_reduction_pct':  float,
+        'errors':                      list,  — market data fetch failures
+    }
+
+    Error responses:
+        400 if request body is invalid or missing required fields.
+        500 if the engine raises an unexpected exception.
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Request body must be JSON.'}), 400
+
+    params, err = _parse_and_validate_request(data)
+    if err:
+        return jsonify({'error': err}), 400
+
+    try:
+        result = recommend_hedges(
+            cash_positions = params['cash_positions'],
+            exposures      = params['exposures'],
+            base_ccy       = params['base_currency'],
+            confidence     = params['confidence'],
+            period         = params['period'],
+            # cash_horizon deliberately not passed — recommend_hedges always
+            # uses CASH_CONSOLIDATED_T_DAYS for cash, matching how the
+            # Consolidated Portfolio VaR treats cash throughout the app.
+        )
+        return jsonify(result)
 
     except Exception as e:
         return jsonify({'error': f'Engine error: {str(e)}'}), 500

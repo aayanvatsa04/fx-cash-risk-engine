@@ -2271,3 +2271,515 @@ def calculate_fx_var(
         # The 'all' key's period_var equals consolidated_var['total_var'] exactly.
         'cumulative_vars': cumulative_vars,
     }
+
+
+# =============================================================================
+# HEDGE RECOMMENDATION ENGINE — V3.8
+# =============================================================================
+#
+# Public entry point:  recommend_hedges()
+# Private helper:      _identify_hedge_candidates()
+#
+# PURPOSE
+# -------
+# Given an existing portfolio (cash + forwards), this engine identifies which
+# forward-hedge contracts would most reduce Portfolio VaR, and ranks them by
+# marginal impact so a treasurer can prioritise their hedging activity.
+#
+# CONCEPTUAL NOTE: WHY FORWARD CONTRACTS AS OPPOSING EXPOSURES?
+# -------------------------------------------------------------
+# A hedging forward (e.g. buy MYR at 3.20 on 20-Aug) has a LOCKED settlement
+# rate, which might suggest it has no outcome uncertainty. However, Portfolio
+# VaR measures variance of mark-to-market value, not settlement-rate uncertainty.
+# The forward's mark-to-market value fluctuates with spot rates daily, in exactly
+# the opposite direction to the underlying exposure it hedges. Under the signed-
+# exposure vector:
+#     s = [+E (receivable), −E (hedge payable)]
+# both the volatility term (sᵀ Σ s) and the drift term (sᵀ μ_T) cancel exactly
+# to zero for a perfectly matched hedge — the same result regardless of whether
+# the locked rate F is modelled explicitly or not. F is a constant that shifts
+# expected P&L but does not affect variance. So treating the hedging forward as a
+# regular opposing exposure is not a conceptual shortcut but a mathematically
+# exact result. See design docs / README for the full derivation.
+#
+# WHAT IS NOT MODELLED (known PoC limitations):
+#   - Hedging costs (bid-ask spread, bank credit lines, collateral) — all hedges
+#     are assumed costless in this model. In practice a high-cost hedge on a small
+#     exposure might not be worth entering. See Known Limitations in README.
+#   - Options — this engine only proposes forward contracts (linear instruments).
+#     The delta-normal VaR model cannot represent option payoffs, which are
+#     non-linear in spot rate. Options are a V4+ feature (requires Monte Carlo).
+#   - Cross-currency proxy hedges — only direct same-currency forwards are proposed.
+#     Using a correlated currency to hedge an illiquid one introduces basis risk
+#     beyond this engine's scope.
+
+
+def _identify_hedge_candidates(
+    exposures:   list[dict],
+    base_ccy:    str,
+    market_data: dict,
+) -> list[dict]:
+    """
+    Identifies hedge opportunities from the forward exposure list.
+
+    For each (currency, bucket) pair that has a non-trivial net forward
+    exposure, proposes an offsetting forward contract at the bucket midpoint T.
+
+    === WHAT IS A HEDGE CANDIDATE? ===
+
+    A hedge candidate is a proposed forward contract that opposes the existing
+    net forward position in a (currency, bucket) pair:
+        - Net receivable in a currency/bucket → propose payable (sell FCY forward)
+        - Net payable in a currency/bucket    → propose receivable (buy FCY forward)
+
+    The proposed notional equals the absolute net FCY notional for that group,
+    so that — if entered — it would drive net notional to zero in that
+    (currency, bucket) pair.
+
+    === CASH IS DELIBERATELY EXCLUDED ===
+
+    Cash positions are NOT included in candidate generation:
+        - Cash is a physical asset the company already holds; it does not need
+          a forward contract to "hedge" it. The cash itself IS the hedge for
+          same-currency Bucket 1 payables.
+        - Cash's natural offset against forward obligations is already captured
+          in the Consolidated Portfolio VaR (and therefore in the VaR reduction
+          measured by recommend_hedges) — it doesn't need to appear as a
+          separate hedge candidate.
+        - Proposing "sell your USD cash via a forward" would confuse a treasurer
+          who already holds the cash and does not need that transaction.
+
+    This means: if a user holds USD 2mn cash AND has a USD 1mn Bucket 2 payable,
+    the hedge candidate for that payable will be "buy USD 1mn forward (Bucket 2
+    T=42d)". The cash has nothing to do with the forward hedge candidate.
+
+    === THRESHOLD ===
+
+    Candidates with abs(net_notional_base) < 1.0 are skipped as floating-point
+    noise (e.g. a near-perfectly-netted forward pair in the same bucket where
+    only a rounding residual remains). The threshold is 1 unit of base currency
+    — small enough to be invisible on any real P&L statement.
+
+    Args:
+        exposures:   Forward exposure list from the user (currency, amount,
+                     settlement_date, direction). Must NOT include cash synthetic
+                     receivables — pass only the original user-supplied list.
+        base_ccy:    Company home currency (e.g. 'SGD').
+        market_data: Pre-fetched market data from fetch_market_data_batch().
+                     Must include 'spot_rate' and 'error' per currency.
+
+    Returns:
+        List of candidate dicts (UNSORTED — recommend_hedges ranks them).
+        Each dict contains:
+            'currency':              str   — FCY ISO code
+            'bucket_num':            int   — bucket number (1–5)
+            'bucket_label':          str   — human-readable bucket window
+            'bucket_midpoint_t':     int   — trading days T used for the hedge
+            'net_notional_fcy':      float — signed net FCY across all forwards in
+                                             this (ccy, bucket) — positive = net
+                                             receivable, negative = net payable
+            'net_notional_base':     float — net_notional_fcy × spot_rate (signed,
+                                             base currency)
+            'hedge_direction':       str   — 'payable'    (if net receivable > 0,
+                                              propose selling FCY)
+                                             'receivable' (if net payable < 0,
+                                              propose buying FCY)
+            'hedge_amount_fcy':      float — abs(net_notional_fcy) — proposed
+                                             contract notional in FCY
+            'hedge_settlement_date': str   — 'YYYY-MM-DD' at bucket midpoint T
+            'spot_rate':             float — current spot rate (base per 1 FCY)
+    """
+    # Accumulate net SIGNED FCY notional per (currency, bucket_num).
+    # Signed convention: receivable = +FCY (long), payable = -FCY (short).
+    # defaultdict ensures first-access initialises to 0.0 without key checks.
+    net_fcy: dict[tuple, float] = defaultdict(float)
+
+    # Bucket metadata keyed by (ccy, bucket_num) — same values for all
+    # exposures in the same group, so we just overwrite; idempotent.
+    bucket_meta: dict[tuple, dict] = {}
+
+    for exp in exposures:
+        ccy       = exp['currency'].upper().strip()
+        direction = exp.get('direction', '').lower().strip()
+        amount    = float(exp.get('amount', 0))
+
+        # Skip base currency (no FX risk) and invalid directions
+        if ccy == base_ccy.upper():
+            continue
+        if direction not in VALID_DIRECTIONS:
+            continue
+
+        # Skip currencies where market data fetch failed
+        md = market_data.get(ccy)
+        if md is None or md.get('error') is not None:
+            continue
+
+        # Skip already-settled exposures
+        actual_days = count_trading_days(exp['settlement_date'])
+        if actual_days < 1:
+            continue
+
+        bucket = assign_to_bucket(actual_days)
+        key    = (ccy, bucket['num'])
+
+        # Receivable: +FCY (we will receive this currency — long position)
+        # Payable:    -FCY (we need to pay this currency — short position)
+        signed_fcy = amount if direction == 'receivable' else -amount
+        net_fcy[key] += signed_fcy
+
+        if key not in bucket_meta:
+            bucket_meta[key] = {
+                'bucket_num':        bucket['num'],
+                'bucket_label':      bucket['label'],
+                'bucket_midpoint_t': bucket['midpoint_days'],
+                'spot_rate':         float(md['spot_rate']),
+            }
+
+    # Build candidate list, skipping trivially small residuals
+    candidates = []
+    for (ccy, _bucket_num), net_fcy_val in net_fcy.items():
+        meta     = bucket_meta[(ccy, _bucket_num)]
+        spot     = meta['spot_rate']
+        net_base = net_fcy_val * spot
+
+        # Ignore near-zero residuals (< 1 unit of base currency).
+        # These arise from near-perfectly-netted pairs where only
+        # floating-point rounding remains — not worth recommending a contract.
+        if abs(net_base) < 1.0:
+            continue
+
+        # Hedge direction is the OPPOSITE of the net position:
+        #   net > 0 (net receivable) → we have FCY coming in →
+        #       hedge by selling FCY forward → propose payable
+        #   net < 0 (net payable)    → we need to pay FCY →
+        #       hedge by buying FCY forward → propose receivable
+        hedge_dir        = 'payable' if net_fcy_val > 0 else 'receivable'
+        hedge_settlement = trading_days_to_date(meta['bucket_midpoint_t'])
+
+        candidates.append({
+            'currency':              ccy,
+            'bucket_num':            meta['bucket_num'],
+            'bucket_label':          meta['bucket_label'],
+            'bucket_midpoint_t':     meta['bucket_midpoint_t'],
+            'net_notional_fcy':      round(net_fcy_val, 2),
+            'net_notional_base':     round(net_base,    2),
+            'hedge_direction':       hedge_dir,
+            'hedge_amount_fcy':      round(abs(net_fcy_val), 2),
+            'hedge_settlement_date': hedge_settlement,
+            'spot_rate':             spot,
+        })
+
+    return candidates
+
+
+def recommend_hedges(
+    cash_positions: list[dict],
+    exposures:      list[dict],
+    base_ccy:       str,
+    confidence:     float = 0.95,
+    period:         str   = '1y',
+) -> dict:
+    """
+    Hedge Recommendation Engine (V3.8). Identifies which forward contracts
+    would most reduce Consolidated Portfolio VaR, ranked by marginal impact.
+
+    === ALGORITHM ===
+
+    1. Fetch market data once — reused for all VaR re-computations.
+    2. Compute BASELINE Consolidated Portfolio VaR (before any hedges).
+    3. Compute BASELINE Component CFaRs (from 'all' cumulative period) —
+       used to rank currencies by their risk contribution.
+    4. Identify hedge CANDIDATES from forward exposures only (not cash) via
+       _identify_hedge_candidates(). One candidate per (currency, bucket)
+       where net forward FCY ≠ 0.
+    5. RANK candidates:
+           Primary key:   abs(Component CFaR of that currency) — descending.
+                          This correctly accounts for cross-currency covariance:
+                          a large-notional currency that diversifies against
+                          another will have a LOWER Component CFaR and rank lower
+                          than a smaller-notional currency that drives portfolio risk.
+           Secondary key: abs(net_notional_base) of this specific (ccy, bucket)
+                          pair — descending. Tie-breaks within the same currency.
+    6. CUMULATIVE APPLICATION: apply hedges one at a time in ranked order.
+       After each hedge is appended to the running exposure list,
+       calculate_consolidated_portfolio_var is re-run with the full
+       min(Tᵢ,Tⱼ) covariance matrix — so each subsequent hedge's impact
+       correctly reflects the changed portfolio structure (including all
+       previously applied hedges).
+    7. Return ranked table with before/after Portfolio VaR, marginal reduction
+       (this hedge's incremental impact on top of previous hedges), and
+       cumulative reduction (total from baseline to this point).
+
+    === WHY RE-RUN THE ENGINE EACH ITERATION? ===
+
+    The impact of hedge N depends on hedges 1..N-1 already being in place —
+    cross-currency covariance terms change as the portfolio structure changes.
+    A simple "each hedge reduces portfolio VaR by its Component CFaR" formula
+    would be wrong because Component CFaRs are computed for the ORIGINAL portfolio;
+    they don't auto-update when hedges are added. Full re-computation is necessary
+    for honest marginal-reduction figures.
+
+    === MARKET DATA EFFICIENCY ===
+
+    Market data is fetched ONCE at the start and reused across all re-computations.
+    Each hedge iteration calls calculate_consolidated_portfolio_var directly
+    (bypassing calculate_fx_var's full three-section computation) so only the
+    consolidated VaR is recalculated — not bucketed VaR, gross attribution, etc.
+
+    === INPUTS ===
+
+    Same structure as calculate_fx_var — no new required inputs. The route
+    handler at app.py reuses _parse_and_validate_request, so the same JSON
+    payload validates for both /calculate and /recommend_hedges.
+
+    Note: cash_horizon is deliberately NOT an input here. The consolidated
+    Portfolio VaR used for recommendations always uses CASH_CONSOLIDATED_T_DAYS
+    (10 trading days) for cash positions — the same convention used by
+    calculate_consolidated_portfolio_var. This keeps the recommendation results
+    independent of the Cash VaR Horizon dropdown, consistent with all other
+    Portfolio VaR / Risk Dashboard figures.
+
+    Args:
+        cash_positions: List of cash position dicts ({currency, balance}).
+        exposures:      List of forward exposure dicts ({currency, amount,
+                        settlement_date, direction}).
+        base_ccy:       Company home currency (e.g. 'SGD').
+        confidence:     VaR confidence level (e.g. 0.95 for 95%).
+        period:         yfinance historical lookback (e.g. '1y').
+
+    Returns:
+        {
+            'base_ccy':                   str,   — home currency
+            'baseline_var':               float, — Portfolio VaR before any hedges
+            'recommendations': [          — ranked list, one entry per candidate
+                {
+                    'rank':                     int,
+                    'currency':                 str,
+                    'bucket_num':               int,
+                    'bucket_label':             str,
+                    'bucket_midpoint_t':        int,   — T used for the hedge
+                    'net_notional_fcy':         float, — signed net forward FCY
+                    'net_notional_base':        float, — net_notional_fcy × spot
+                    'component_cfar_baseline':  float, — currency's Component CFaR
+                                                         in the ORIGINAL portfolio
+                                                         (used for ranking; changes
+                                                         as hedges are added)
+                    'hedge_direction':          str,   — 'payable' or 'receivable'
+                    'hedge_amount_fcy':         float, — proposed contract size (FCY)
+                    'hedge_settlement_date':    str,   — 'YYYY-MM-DD'
+                    'hedge_settlement_t':       int,   — same as bucket_midpoint_t
+                    'spot_rate':                float, — current rate (display only)
+                    'portfolio_var_before':     float, — VaR just before this hedge
+                    'portfolio_var_after':      float, — VaR just after this hedge
+                    'marginal_reduction_abs':   float, — this hedge's own reduction
+                    'marginal_reduction_pct':   float, — as % of portfolio_var_before
+                    'cumulative_reduction_abs': float, — total reduction from baseline
+                    'cumulative_reduction_pct': float, — as % of baseline_var
+                }
+            ],
+            'fully_hedged_var':            float, — VaR after ALL hedges applied
+            'fully_hedged_reduction_pct':  float, — total % reduction
+            'errors':                      list,  — any market data issues
+        }
+    """
+    # -------------------------------------------------------------------------
+    # Step 1: Fetch market data once — reused for every VaR re-computation.
+    # Same batch approach as calculate_fx_var; results cached in market_data dict.
+    # -------------------------------------------------------------------------
+    print("recommend_hedges: fetching market data…")
+    all_ccys   = (
+        [p['currency'] for p in cash_positions] +
+        [e['currency'] for e in exposures]
+    )
+    market_data = fetch_market_data_batch(all_ccys, base_ccy, period)
+
+    # Collect any fetch errors for the response (currencies that will be skipped)
+    fetch_errors = [
+        {'currency': ccy, 'reason': md['error']}
+        for ccy, md in market_data.items()
+        if md.get('error') is not None
+    ]
+
+    # -------------------------------------------------------------------------
+    # Step 2: Compute BASELINE Consolidated Portfolio VaR.
+    # This is the "before any hedges" figure — the starting point for all
+    # reduction calculations below.
+    # -------------------------------------------------------------------------
+    print("recommend_hedges: computing baseline consolidated VaR…")
+    baseline_result = calculate_consolidated_portfolio_var(
+        cash_positions = cash_positions,
+        exposures      = exposures,
+        base_ccy       = base_ccy,
+        market_data    = market_data,
+        confidence     = confidence,
+    )
+    baseline_var = baseline_result['total_var']
+
+    # -------------------------------------------------------------------------
+    # Step 3: Compute BASELINE Component CFaRs for ranking.
+    # The 'all' cumulative period covers the entire portfolio and its
+    # 'currencies' dict gives each currency's Component CFaR — the single
+    # best signal for which currency is driving the most portfolio risk.
+    #
+    # Component CFaR is preferable to raw notional for ranking because it
+    # already encodes cross-currency covariance: a large-notional currency
+    # that diversifies against another will have lower Component CFaR than
+    # a smaller-notional currency that is the primary risk driver.
+    # -------------------------------------------------------------------------
+    print("recommend_hedges: computing baseline Component CFaRs for ranking…")
+    baseline_cumulative = calculate_cumulative_period_vars(
+        cash_positions = cash_positions,
+        exposures      = exposures,
+        base_ccy       = base_ccy,
+        market_data    = market_data,
+        confidence     = confidence,
+    )
+    # 'all' period currencies dict: {ccy: {component_var, vol_part, drift_part, ...}}
+    cfar_by_ccy = baseline_cumulative.get('all', {}).get('currencies', {})
+
+    # -------------------------------------------------------------------------
+    # Step 4: Identify hedge candidates from FORWARD exposures only.
+    # Cash positions are deliberately excluded — see _identify_hedge_candidates
+    # docstring for the full rationale.
+    # -------------------------------------------------------------------------
+    candidates = _identify_hedge_candidates(
+        exposures    = exposures,
+        base_ccy     = base_ccy,
+        market_data  = market_data,
+    )
+
+    # Early exit: no hedgeable forward exposures found
+    if not candidates:
+        return {
+            'base_ccy':                   base_ccy,
+            'baseline_var':               round(baseline_var, 2),
+            'recommendations':            [],
+            'fully_hedged_var':           round(baseline_var, 2),
+            'fully_hedged_reduction_pct': 0.0,
+            'errors':                     fetch_errors,
+        }
+
+    # -------------------------------------------------------------------------
+    # Step 5: Rank candidates by descending Component CFaR magnitude.
+    #
+    # Primary key:   abs(Component CFaR of that currency) — largest risk driver
+    #                first. Uses baseline 'all' period Component CFaR.
+    # Secondary key: abs(net_notional_base) of this (ccy, bucket) pair —
+    #                tie-breaks within the same currency (larger bucket first).
+    #
+    # Note: we rank by CURRENCY-level Component CFaR even though candidates are
+    # per (currency, bucket). This means all MYR buckets will be ranked
+    # consecutively (before moving to USD), ordered within MYR by notional.
+    # This is intentional: "fix your biggest currency risk driver first, then
+    # move to the next" is more natural than interleaving buckets across CCYs.
+    # -------------------------------------------------------------------------
+    def _rank_key(candidate: dict) -> tuple:
+        ccy      = candidate['currency']
+        cfar_mag = abs(cfar_by_ccy.get(ccy, {}).get('component_var', 0.0))
+        notl_mag = abs(candidate['net_notional_base'])
+        # Negative values → sort descending (Python sorts ascending by default)
+        return (-cfar_mag, -notl_mag)
+
+    candidates.sort(key=_rank_key)
+
+    # -------------------------------------------------------------------------
+    # Step 6: Cumulatively apply hedges, re-running Consolidated VaR each time.
+    #
+    # running_exposures starts as a COPY of the original forward list.
+    # Each iteration appends one hedge forward and re-runs the full covariance
+    # calculation. The result captures exactly how much risk each additional
+    # hedge removes, given all previously-applied hedges already in place.
+    #
+    # Each hedge forward entry is a standard exposure dict:
+    #     currency, amount, settlement_date, direction
+    # The '_is_hedge' flag is metadata for future tooling (e.g. UI distinction
+    # between "original exposure" and "proposed hedge") — the VaR engine never
+    # reads it (see _build_individual_positions_list — it only uses the four
+    # fields above). It is safe to include in the list without affecting math.
+    # -------------------------------------------------------------------------
+    print(f"recommend_hedges: evaluating {len(candidates)} candidate hedge(s)…")
+    running_exposures = list(exposures)   # copy — never modify caller's list
+    running_var       = baseline_var
+    recommendations   = []
+
+    for rank_idx, candidate in enumerate(candidates):
+        ccy = candidate['currency']
+
+        # Build the hedge as a standard forward exposure entry
+        hedge_entry = {
+            'currency':        ccy,
+            'amount':          candidate['hedge_amount_fcy'],
+            'settlement_date': candidate['hedge_settlement_date'],
+            'direction':       candidate['hedge_direction'],
+            '_is_hedge':       True,   # metadata only — not read by VaR math
+        }
+        running_exposures.append(hedge_entry)
+
+        # Re-run consolidated VaR with this hedge in the exposure list.
+        # Uses the same market_data already fetched — no new network call.
+        new_result = calculate_consolidated_portfolio_var(
+            cash_positions = cash_positions,
+            exposures      = running_exposures,
+            base_ccy       = base_ccy,
+            market_data    = market_data,
+            confidence     = confidence,
+        )
+        new_var = new_result['total_var']
+
+        # Marginal reduction: THIS hedge's own impact on top of prior hedges.
+        # running_var holds the VaR from the PREVIOUS iteration (or baseline).
+        marginal_abs = running_var - new_var
+        marginal_pct = (marginal_abs / running_var * 100) if running_var > 1e-9 else 0.0
+
+        # Cumulative reduction: total impact from the original baseline.
+        cumulative_abs = baseline_var - new_var
+        cumulative_pct = (cumulative_abs / baseline_var * 100) if baseline_var > 1e-9 else 0.0
+
+        recommendations.append({
+            'rank':                     rank_idx + 1,
+            'currency':                 ccy,
+            'bucket_num':               candidate['bucket_num'],
+            'bucket_label':             candidate['bucket_label'],
+            'bucket_midpoint_t':        candidate['bucket_midpoint_t'],
+            'net_notional_fcy':         candidate['net_notional_fcy'],
+            'net_notional_base':        candidate['net_notional_base'],
+            # component_cfar_baseline: this currency's Component CFaR in the
+            # ORIGINAL (unhedged) portfolio. Used for display context — shows
+            # the user WHY this was ranked where it was.
+            'component_cfar_baseline':  round(float(
+                cfar_by_ccy.get(ccy, {}).get('component_var', 0.0)
+            ), 2),
+            'hedge_direction':          candidate['hedge_direction'],
+            'hedge_amount_fcy':         candidate['hedge_amount_fcy'],
+            'hedge_settlement_date':    candidate['hedge_settlement_date'],
+            'hedge_settlement_t':       candidate['bucket_midpoint_t'],
+            'spot_rate':                candidate['spot_rate'],
+            'portfolio_var_before':     round(running_var, 2),
+            'portfolio_var_after':      round(new_var,     2),
+            'marginal_reduction_abs':   round(marginal_abs,   2),
+            'marginal_reduction_pct':   round(marginal_pct,   1),
+            'cumulative_reduction_abs': round(cumulative_abs, 2),
+            'cumulative_reduction_pct': round(cumulative_pct, 1),
+        })
+
+        # Advance running VaR to the new (post-hedge) level for next iteration
+        running_var = new_var
+
+    # Final state: fully hedged Portfolio VaR after ALL candidates applied
+    fully_hedged_var = running_var
+    fully_hedged_pct = (
+        (baseline_var - fully_hedged_var) / baseline_var * 100
+        if baseline_var > 1e-9 else 0.0
+    )
+
+    print(f"recommend_hedges: complete. Baseline {baseline_var:.2f} → "
+          f"fully hedged {fully_hedged_var:.2f} ({fully_hedged_pct:.1f}% reduction).")
+
+    return {
+        'base_ccy':                   base_ccy,
+        'baseline_var':               round(baseline_var,      2),
+        'recommendations':             recommendations,
+        'fully_hedged_var':            round(fully_hedged_var,  2),
+        'fully_hedged_reduction_pct':  round(fully_hedged_pct,  1),
+        'errors':                      fetch_errors,
+    }
