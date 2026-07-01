@@ -34,16 +34,24 @@ clicks Calculate once, and sees:
    min(Ti,Tj) cross-horizon covariance formula across all positions, with
    its own independent Portfolio Scenario sliders for a live "what-if"
    stressed figure on the same card.
-4. **Bucketed Risk Detail** — full per-bucket technical breakdown: individual
+4. **Hedge Recommendations** — ranked forward-contract proposals that
+   reduce Consolidated Portfolio VaR, triggered by a dedicated "Get Hedge
+   Recommendations" button on the Consolidated VaR card. Separate from
+   Calculate because it re-runs the full covariance engine once per hedge
+   candidate (O(N) calls). Rows that would increase portfolio VaR are
+   flagged with amber visual warnings so the treasurer knows where to stop.
+5. **Bucketed Risk Detail** — full per-bucket technical breakdown: individual
    positions, net VaRs, natural hedge benefit, and diversification benefit
    per bucket. Analyst-level detail.
-5. **Risk Dashboard** — headline stat cards, a net notional bar chart paired
+6. **Risk Dashboard** — headline stat cards, a net notional bar chart paired
    with a separate Component CFaR bar section below it, cumulative period
    filter, its own independent scenario simulation sliders, and hedge
    effectiveness table. Appears last, since it summarises numbers already
-   computed in the four sections above rather than introducing new ones.
+   computed in the five sections above rather than introducing new ones.
 
-All five sections are driven by a single API response from one Calculate click.
+Sections 1–3 and 5–6 are driven by a single API response from one Calculate
+click. Section 4 is triggered separately on demand via a dedicated button
+(POST /recommend_hedges).
 
 ---
 
@@ -57,16 +65,27 @@ All five sections are driven by a single API response from one Calculate click.
 ④ Cash Book Risk (standalone cash VaR at user-specified T)
 ⑤ Consolidated Portfolio VaR (full portfolio, exact individual-T covariance)
    └── Portfolio Scenario sliders (±10% spot, ±25% vol) → Stressed Portfolio VaR
-⑥ Bucketed Risk Detail (per-bucket netting, attribution, diversification)
-⑦ RISK DASHBOARD (summary view, shown last)
+   └── ⬡ Get Hedge Recommendations button (triggers ⑥ below via POST /recommend_hedges)
+⑥ Hedge Recommendations (shown only after button click — separate from Calculate)
+   ├── Summary strip: Baseline VaR → Optimal Hedged VaR · % reduction
+   ├── Ranked table: proposed forward per (currency, bucket), VaR before/after,
+   │   marginal and cumulative reduction — amber row + ⚠ badge for any hedge
+   │   that increases VaR (counterproductive due to covariance shift)
+   └── PoC Simplifications disclaimer (forward rate ≈ spot, bucket midpoint T,
+       cash excluded)
+⑦ Bucketed Risk Detail (per-bucket netting, attribution, diversification)
+⑧ RISK DASHBOARD (summary view, shown last)
    ├── Stat cards: Portfolio VaR · Spot Book VaR · Gross Standalone · Risk Reduction
    ├── Net Cashflow Exposure bar chart (net notional, labelled with its own value)
    ├── Component CFaR bars (separate horizontal bars, sorted by risk magnitude)
+   │   NOTE: same currency order as Hedge Recommendations table — both rank by
+   │   Component CFaR from the 'all' period, so the two sections reinforce each other
    ├── Scenario Simulation sliders (±10% spot, ±25% vol) — independent of ⑤'s sliders
    └── Natural Hedge Effectiveness table (per currency per bucket)
-⑧ Model Notes & Limitations — always visible, independent of the Calculate
+⑨ Model Notes & Limitations — always visible, independent of the Calculate
    button (renders on page load, before any input is entered; sections
-   ③–⑦ above are hidden until the first successful Calculate response)
+   ③–⑧ above are hidden until the first successful Calculate response;
+   section ⑥ additionally requires the explicit button click)
    (formula, confidence-level meaning, output-section definitions,
     Component CFaR, Gross Standalone Risk scope, market data sourcing,
     Known Limitations table)
@@ -89,6 +108,57 @@ All five sections are driven by a single API response from one Calculate click.
   data already present in the `/calculate` response — no backend, engine, or
   `dashboard_engine.py` changes were required. Hidden at page load; shown
   only when cash positions exist.
+
+- **Hedge Recommendation Engine (V3.8):** Proposes ranked FX forward contracts
+  to reduce Consolidated Portfolio VaR, triggered by a dedicated "Get Hedge
+  Recommendations" button on the Consolidated VaR card. Served by a new
+  `POST /recommend_hedges` endpoint — deliberately separate from `POST /calculate`
+  because it re-runs `calculate_consolidated_portfolio_var()` once per hedge
+  candidate (O(N) engine calls), which is too expensive to include on every
+  Calculate click.
+
+  **Algorithm (three steps):**
+  1. *Identify candidates* (`_identify_hedge_candidates()` in `exposure_engine.py`):
+     group forward exposures by (currency, bucket), sum signed FCY notionals within
+     each group. Each group with non-trivial net exposure becomes one candidate —
+     a proposed forward in the exact opposite direction at bucket midpoint T.
+     Cash is intentionally excluded: it is a liquid asset already held, not a
+     forward obligation that needs hedging.
+  2. *Rank candidates*: primary sort by absolute Component CFaR of the currency
+     (from the 'all' period, descending) — the same ranking that drives the Risk
+     Dashboard Component CFaR bars, so the two sections are visually consistent.
+     Secondary sort by absolute net notional within the same currency. Component
+     CFaR is the right ranking signal because it already encodes cross-currency
+     covariance: a large-notional currency that diversifies against another will
+     rank lower than a smaller currency driving marginal portfolio risk.
+  3. *Apply cumulatively*: add each hedge to the running exposure list in ranked
+     order, re-running the full min(Tᵢ,Tⱼ) covariance matrix after each one.
+     This is necessary because the covariance structure changes as hedges are
+     applied — the marginal reduction of hedge N depends on hedges 1…N-1 already
+     being in place. Simple subtraction of Component CFaRs would give wrong answers.
+
+  **Counterproductive hedge detection:** when a candidate's marginal VaR reduction
+  is negative (the hedge increases portfolio risk due to changed covariance
+  structure), the row is flagged in amber with a ⚠ badge and "adds risk" label.
+  The summary strip shows "Optimal Hedged VaR (stop at rank N)" rather than
+  "Fully Hedged VaR", directing the treasurer to the actual minimum-risk stopping
+  point. This is a known property of the greedy sequential algorithm: the baseline
+  Component CFaR ranking is computed on the original portfolio and becomes stale
+  as hedges are applied — a future improvement could re-rank after each step.
+
+  **PoC simplifications disclosed in the UI:**
+  - Forward rate ≈ spot rate (interest rate parity not modelled)
+  - Settlement dates are bucket midpoint T (e.g. 42 days for Bucket 2), not
+    the theoretically optimal exposure-weighted average T within the bucket
+  - Cash positions excluded from candidates
+
+  **Mathematical validity:** treating a hedging forward as a regular opposing
+  exposure in the signed exposure vector is not an approximation — it is exact.
+  F (the locked forward rate) is a constant that drops out of the variance
+  calculation: for a perfectly matched hedge, both the volatility term (sᵀΣs)
+  and drift term (sᵀμ_T) cancel exactly to zero via [+E, −E]. For imperfect
+  T-match, the engine correctly captures the residual risk through the
+  min(Tᵢ,Tⱼ) formula with no special-casing needed.
 
 - **Cash Book Risk:** Standalone parametric VaR on cash holdings at user-
   specified T. Per-currency breakdown. Portfolio total is covariance-adjusted
@@ -189,11 +259,14 @@ All five sections are driven by a single API response from one Calculate click.
 
 ```
 fx-cash-risk-engine/
-├── app.py                  Flask web server — routes: GET / and POST /calculate
+├── app.py                  Flask web server — routes: GET /, POST /calculate,
+│                           POST /recommend_hedges (V3.8)
 ├── var_engine.py           Core VaR math — σ, μ, parametric formula, covariance
-├── exposure_engine.py      Business logic — dates, buckets, netting, unified output
+├── exposure_engine.py      Business logic — dates, buckets, netting, unified output,
+│                           hedge recommendation engine (V3.8)
 ├── dashboard_engine.py     Data transformation — engine output → chart-ready JSON
-├── engine_runner.py        Standalone CLI runner — verify engine output without Flask
+├── engine_runner.py        Standalone CLI runner — 8-section verification covering
+│                           all engine outputs before any browser involvement
 ├── requirements.txt        Python dependencies for deployment
 ├── Procfile                Tells Render how to start the app
 ├── .gitignore              Files excluded from Git version control
@@ -238,6 +311,8 @@ Strict rules maintained across all files:
 | New dashboard views / stat cards | `dashboard_engine.py` + `calculator.html` |
 | New chart behaviour / slider logic | `dashboard.js` |
 | New pages or API endpoints | `app.py` |
+| New hedge strategy / ranking logic | `exposure_engine.py` (`_identify_hedge_candidates`, `recommend_hedges`) |
+| New engine verification section | `engine_runner.py` (add a new `print_<feature>()` function, wire into `__main__`) |
 
 ### How the unified page works
 
@@ -251,11 +326,23 @@ app.py calls prepare_dashboard_data()   — chart-ready JSON attached as 'dashbo
   ↓
 Single JSON response returned
   ↓
-calculator.html JS renders all result sections
+calculator.html JS renders sections ③–⑤ and ⑦–⑧
   ↓
 fires CustomEvent('varResultReady', { detail: result.dashboard })
   ↓
 dashboard.js receives event → renders chart, sliders, hedge table
+
+── separately, on button click ──
+
+User clicks "Get Hedge Recommendations"
+  ↓
+calculator.html JS reads same form inputs  →  POST /recommend_hedges
+  ↓
+app.py calls recommend_hedges()             — O(N) engine re-runs, one per candidate
+  ↓
+JSON response returned
+  ↓
+calculator.html JS renders section ⑥ (Hedge Recommendations)
 ```
 
 ### Frontend architecture note: CSS Grid vs native `<table>`
@@ -313,14 +400,19 @@ source .venv/bin/activate          # macOS / Linux
 pip install -r requirements.txt
 ```
 
-**3. Test the engine without Flask (optional but recommended):**
+**3. Test the engine without Flask (recommended before every push):**
 ```bash
 python3 engine_runner.py
 ```
-Runs the full engine and prints all sections to the terminal.
-Verify: Bucket 1 shows cash positions as synthetic receivables.
-Bucket 2 USD shows natural hedge benefit (recv 2mn offset by pay 1mn).
-MYR also shows hedge benefit in Bucket 2.
+Runs all eight verification sections against a representative test scenario
+and prints ✓/✗ for every sanity check, with a final PASS/FAIL summary.
+No Flask server or browser needed — this is the first abstraction barrier
+check: if a number is wrong here, it will be wrong in the browser too.
+
+Sections covered: [S1] Spot Book Risk · [S1b] Cash Sensitivity source data ·
+[S2] Bucketed Risk · [S3] Gross Attribution · [S3b] Gross Cash Attribution ·
+[S4] Consolidated VaR · [S5] Cumulative Period VaRs + Component CFaR ·
+[S6] Hedge Recommendations
 
 **4. Start the web server:**
 ```bash
@@ -715,6 +807,10 @@ question of where a new row goes.
 | Vol slider made fully EXACT, not just continuous (V3.6) — superseded the V3.5 interim patch entirely. `net_notional_base`-derived `vol_term`/`mu_term` removed completely; replaced with `vol_part`/`drift_part`, computed in `exposure_engine.py`'s `_compute_component_vars_by_currency()` from the same per-position arrays that produce the exact static Component CFaR. `applySimulation()` is now ONE formula for every currency (long, short, or flat) — `new_cfar = (1+Δvol)×vol_part − drift_part` — with no direction branching and no zero-floor (negative components are meaningful, not errors) | User pushed back on whether a 0.1% vol move should really change numbers as much as it did, even after the V3.5 patch — testing confirmed it was much worse than the flat-currency case alone: real currencies in a real portfolio showed jumps of several hundred percent (one case 4,070%) and even sign flips from a vol delta of a few thousandths of a percent, because the old `vol_term`/`mu_term` was a standalone single-position-style estimate that completely ignored cross-currency covariance — fundamentally a different quantity from the exact, marginal Component CFaR it was meant to approximate. The fix isn't a better approximation; it's mathematically exact, provable from the covariance matrix being homogeneous of degree 2 in σ under a uniform vol-regime shift (see `_compute_component_vars_by_currency`'s docstring for the full derivation). Verified empirically, not just symbolically: every currency's simulated value at +25% vol matched a full engine re-run to within floating-point rounding, including MYR's cross-horizon residual case, with zero special-casing required in the new code. Branch-worthy (`exposure_engine.py`, `dashboard_engine.py` both touched) — `dashboard.js` and `calculator.html` updated to match; `effective_T` retained as a display-only field (Chart Detail Panel), no longer feeding any simulation math. The spot slider's approximation (shifting one currency's exposure doesn't have the same exact-scaling identity) is unchanged and remains disclosed in Known Limitations |
 | Component CFaR bars no longer re-sort or rebuild on every slider tick (V3.7) — `renderCfarBarsForPeriod()` now locks display order and the scaling denominator ONCE per period render (a fresh Calculate or a period-dropdown change, both of which reset sliders to 0 first), and a new `updateCfarBarsInPlace()` handles every subsequent slider tick by mutating each row's existing width/value directly instead of rebuilding the section | Even after V3.6 made the underlying numbers exact, the bars still visually behaved badly: `renderCfarBarsForPeriod()` was being called again on every tick, re-sorting by current `\|CFaR\|` (letting two close-magnitude currencies visually swap rank from a small real change) and rebuilding the section's entire `innerHTML` every time (which silently defeated the `.cfar-bar-fill` CSS width transition — a transition only animates an EXISTING element's property change, and destroying/recreating every element every tick gave the browser nothing to animate from, so bars snapped instead of sliding). Verified empirically with a deliberately-engineered two-currency scenario where one genuinely overtakes the other in magnitude under a vol shift: order stayed locked at its Δ=0 baseline throughout the full slider range, and the same DOM nodes persisted across every tick (confirmed via object identity), proving the CSS transition can now actually animate. Frontend-only (`dashboard.js`, plus a `dashboard.css` comment update) — no Python changes. Also removed an unnecessary `CSS.escape()` call added during this work (currency codes are always simple 3-letter uppercase ISO codes from the backend, never arbitrary/user-controlled strings, so escaping added a Web API dependency for no real benefit) |
 | New Cash Spot Rate Sensitivity card added above Cash Book Risk (V3.8) — `renderSensitivity()` and `fmtSensChange()` in `calculator.html` render a simple ±20/±10/±5/No-Change scenario table per cash currency | Mentor feedback: stakeholders wanted an immediate, intuitive "what if the rate moves X%" answer ahead of the more technical parametric VaR figure, without needing to understand confidence levels or covariance first. Implemented as pure spot-rate arithmetic (`change_base = exposure_base × (scenario_pct / 100)`) reusing `exposure_base` already present in `spot_risk.positions` — no backend, engine, or `dashboard_engine.py` changes required. Scoped to cash positions only; forward exposures are excluded since their payable/receivable sign logic is already handled by the parametric VaR in Bucketed Risk Detail. Frontend-only — same negative-zero formatting guard as `fmt()`/`fmtC()` reused via the new `fmtSensChange()` |
+| Hedge Recommendation Engine added (V3.8) — new `POST /recommend_hedges` endpoint (`app.py`), `_identify_hedge_candidates()` + `recommend_hedges()` in `exposure_engine.py`, ranked table UI with "Get Hedge Recommendations" button in `calculator.html` | Adds a sixth output section proposing ranked FX forward contracts to reduce Consolidated Portfolio VaR. Algorithm: (1) identify one hedge candidate per (currency, bucket) from forward exposures only — cash excluded; (2) rank by baseline Component CFaR magnitude (same ranking as Risk Dashboard Component CFaR bars, so the two sections are visually consistent); (3) apply cumulatively, re-running `calculate_consolidated_portfolio_var()` after each hedge for an exact marginal reduction figure. Treating hedging forwards as opposing exposures in the signed exposure vector is mathematically exact — F (the locked forward rate) is a constant that drops out of the variance calculation. Intentionally separate from `/calculate` because it is O(N) engine re-runs vs a fixed computation set. `dashboard_engine.py` untouched — hedge recommendation data is already clean for the frontend. Section hidden at page load and reset on every new Calculate click so stale results never persist. |
+| Counterproductive hedge visual warning added — rows where `marginal_reduction_abs < 0` (hedge increases portfolio VaR due to changed covariance structure after prior hedges) are flagged in amber: row tint, ⚠ rank badge, amber "adds risk" label in the marginal column | After verifying hedge recommendation output on a real portfolio, rank 7 (AUD) produced a marginal reduction of −SGD 379 — the hedge increased VaR by 0.4%. This is a known property of the greedy sequential algorithm: the ranking uses baseline Component CFaR, which becomes stale as hedges are applied and the portfolio covariance structure changes. The summary strip now distinguishes "Optimal Hedged VaR (stop at rank N)" from "Fully Hedged VaR" when counterproductive rows exist, directing the treasurer to the actual minimum-risk stopping point. Frontend-only (`calculator.html`) — no engine changes. |
+| `getHedgeRecommendations()` DOM selector bug fixed — wrong class names (`.cash-row`, `.cash-ccy` etc.), wrong `toRawNumber()` usage (passed `.value` string instead of DOM element), wrong element IDs (`baseCurrency` → `baseCcy`, `period` → `lookback`) | Button was silently collecting zero positions due to non-existent class selectors, causing an early return before any network call fired. Root cause: function was written without reading the actual DOM structure — input rows are `<div class="grid-row">` inside `#cashBody`/`#expBody`, with inputs accessed via element ID (`cashCcy-N`, `cashBal-N` etc.), not via class selectors. Fixed to mirror `calculate()` exactly, with a detailed comment explaining the DOM pattern for future developers. |
+| `engine_runner.py` expanded from 3 sections to 8 — now covers every engine output at the terminal level | New sections: [S1b] Cash Sensitivity source data verification (applies the same scenario arithmetic in Python to confirm what the browser will show), [S3b] Gross Cash Attribution (confirms fixed T=10 independent of `cash_horizon`), [S4] Consolidated VaR (full position breakdown), [S5] Cumulative Period VaRs + Component CFaR (verifies Euler identity Σ component_var = period_var for every period, vol_part/drift_part decomposition, and the critical cross-check that 'all' period = consolidated_var), [S6] Hedge Recommendations (all mathematical invariants A–G including cross-check of baseline_var against consolidated_var). Each section returns a boolean; a final pass/fail summary table prints at the bottom. S1 sanity check A updated from absolute threshold (< 1 SGD) to 0.01% relative tolerance to handle cross-rate rounding (MYR/SGD via USD cross-multiplication leaves a ~2 SGD difference on 5mn MYR balance — not an engine error, just stored spot_rate precision). |
 
 ---
 

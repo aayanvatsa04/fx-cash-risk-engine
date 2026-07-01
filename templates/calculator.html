@@ -1013,6 +1013,158 @@
     border-top:  1px solid var(--border);
     line-height: 1.5;
   }
+
+  /* ── HEDGE RECOMMENDATIONS TABLE (V3.8) ──────────────────────────────────
+     Scoped entirely under .hrec-* classes so these rules CANNOT leak onto
+     any other table in the app. (Same principle as .hedge-section scoping
+     in dashboard.css — see README "CSS Grid vs native <table>" for rationale.)
+
+     Layout: horizontal scroll on overflow (same as .sens-table-wrap above),
+     monospaced numbers, consistent with the rest of the app's data tables.
+  ────────────────────────────────────────────────────────────────────────── */
+
+  /* Scrollable wrapper — prevents the table overflowing on narrow viewports */
+  .hrec-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;  /* smooth scroll on iOS */
+  }
+
+  .hrec-table {
+    width:           100%;
+    border-collapse: collapse;
+    font-family:     var(--mono);
+    font-size:       12px;
+    min-width:       700px;             /* prevents columns from becoming unreadably narrow */
+  }
+
+  /* Header row */
+  .hrec-th {
+    padding:          8px 12px;
+    text-align:       left;
+    font-size:        10px;
+    text-transform:   uppercase;
+    letter-spacing:   0.08em;
+    color:            var(--muted);
+    border-bottom:    1px solid var(--border);
+    white-space:      nowrap;
+  }
+  .hrec-th-right { text-align: right; }
+
+  /* Body cells */
+  .hrec-td {
+    padding:          10px 12px;
+    vertical-align:   top;
+    border-bottom:    1px solid rgba(255,255,255,0.05);
+    line-height:      1.5;
+  }
+  .hrec-td-right { text-align: right; }
+
+  /* No bottom border on last data row — card padding provides spacing */
+  .hrec-table tbody tr:last-child .hrec-td { border-bottom: none; }
+
+  /* Rank number — large, visually prominent, anchors each row */
+  .hrec-rank {
+    font-size:    18px;
+    font-weight:  500;
+    color:        var(--muted);
+    text-align:   center;
+    vertical-align: middle;
+    white-space:  nowrap;
+  }
+
+  /* Currency badge — matches the style used elsewhere in breakdown grids */
+  .hrec-ccy {
+    display:       block;
+    font-size:     15px;
+    font-weight:   500;
+    color:         var(--fg);
+  }
+
+  /* Bucket label — shown below currency, muted secondary info */
+  .hrec-bucket {
+    display:    block;
+    font-size:  10px;
+    color:      var(--muted);
+    margin-top: 2px;
+  }
+
+  /* Secondary info lines — used under multiple columns */
+  .hrec-sub {
+    display:    block;
+    font-size:  10px;
+    color:      var(--muted);
+    margin-top: 2px;
+  }
+
+  /* Proposed action — "Buy MYR fwd" / "Sell USD fwd" */
+  .hrec-action {
+    display:     block;
+    font-size:   13px;
+    font-weight: 500;
+    color:       var(--accent);   /* green — consistent with positive/actionable values */
+  }
+
+  /* Settlement date */
+  .hrec-date {
+    display:     block;
+    font-size:   12px;
+    color:       var(--fg);
+    white-space: nowrap;
+  }
+
+  /* Portfolio VaR after applying this hedge */
+  .hrec-var-after {
+    display:     block;
+    font-size:   13px;
+    font-weight: 500;
+    color:       var(--fg);
+  }
+
+  /* Reduction figures — teal, consistent with the Risk Reduction stat card */
+  .hrec-reduction {
+    display:     block;
+    font-size:   13px;
+    font-weight: 500;
+    color:       var(--teal, #2dd4bf);
+  }
+
+  /* ── COUNTERPRODUCTIVE HEDGE WARNING STYLES ───────────────────────────────
+     Applied to rows where marginal_reduction_abs < 0 — i.e. this hedge would
+     INCREASE portfolio VaR rather than decrease it, due to covariance effects
+     in the already-hedged portfolio (see renderHedgeRecommendations comment
+     on isCounterproductive for the full explanation).
+
+     Design rationale: amber rather than red because this is not an error in
+     the data — it is valid output from the engine. Red would imply something
+     is broken. Amber signals "proceed with caution / do not execute this one"
+     without alarming the user unnecessarily.
+  ────────────────────────────────────────────────────────────────────────── */
+
+  /* Amount value for a counterproductive hedge — amber to match the row tint */
+  .hrec-warn-val {
+    display:     block;
+    font-size:   13px;
+    font-weight: 500;
+    color:       #fbbf24;   /* amber-400 — intentionally NOT the danger red */
+  }
+
+  /* "⚠ adds risk" label below the amount */
+  .hrec-warn-label {
+    display:     block;
+    font-size:   10px;
+    color:       #fbbf24;
+    font-weight: 500;
+  }
+
+  /* Rank badge replaced by warning triangle for counterproductive rows */
+  .hrec-rank-warn {
+    font-size:   16px;
+    color:       #fbbf24;
+  }
+
+  /* Mobile: on very narrow screens the full table scrolls rather than collapsing.
+     No column hiding or layout restructuring — the horizontal scroll wrapper
+     handles it cleanly without needing media queries here. */
 </style>
 </head>
 <body>
@@ -1335,9 +1487,69 @@
         Dashboard's Scenario Simulation sliders further down the page.
       </p>
     </div>
+
+    <!-- ── GET HEDGE RECOMMENDATIONS BUTTON (V3.8) ──────────────────────────
+         Appears below the Portfolio Scenario panel, inside results-consolidated,
+         so it is only visible after a successful Calculate. Clicking it fires
+         a separate POST /recommend_hedges call (not a re-Calculate) and
+         renders the results in the #results-hedge section immediately below
+         this consolidated card.
+
+         Why separate from Calculate:
+           /recommend_hedges runs calculate_consolidated_portfolio_var once per
+           hedge candidate (O(N) engine calls). This is too expensive to run on
+           every Calculate click when the user may not want recommendations at all.
+           A dedicated button lets the user explicitly request the analysis.
+
+         hedgeBtn and hedgeBtnStatus are wired in getHedgeRecommendations()
+         in the script block below. ──────────────────────────────────────── -->
+    <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px;
+                display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+      <button id="hedgeBtn" onclick="getHedgeRecommendations()"
+              style="background:var(--surface);border:1px solid var(--accent);
+                     color:var(--accent);font-family:var(--mono);font-size:12px;
+                     padding:8px 18px;border-radius:6px;cursor:pointer;
+                     transition:background 0.15s,color 0.15s"
+              onmouseover="this.style.background='var(--accent)';this.style.color='#000'"
+              onmouseout="this.style.background='var(--surface)';this.style.color='var(--accent)'">
+        ⬡ Get Hedge Recommendations
+      </button>
+      <span id="hedgeBtnStatus"
+            style="font-family:var(--mono);font-size:11px;color:var(--muted)"></span>
+    </div>
   </div>
 
 
+
+
+  <!-- ── HEDGE RECOMMENDATIONS (V3.8) ──────────────────────────────────────
+       Triggered by the "Get Hedge Recommendations" button below the
+       Consolidated Portfolio VaR card (see results-consolidated above).
+       This section is SEPARATE from the main Calculate flow:
+         - Calculate  →  POST /calculate   (always runs on every button click)
+         - Get Hedges →  POST /recommend_hedges  (runs only when this button
+                         is clicked, because it is more expensive: it calls
+                         calculate_consolidated_portfolio_var once per hedge
+                         candidate, rather than running a fixed computation)
+
+       Rendered by renderHedgeRecommendations() in the script block below.
+       Hidden at page load; hidden again when Calculate is re-run (stale
+       recommendations should never sit below a fresh portfolio result).
+
+       DISCLAIMER NOTE: The disclaimer rendered inside the card is intentional
+       and mandatory — these are illustrative recommendations, not executable
+       instructions. A treasurer must verify the underlying exposure still
+       exists before entering any forward contract with their bank. ──────── -->
+  <div id="results-hedge" style="display:none">
+    <div class="section-title" style="margin-top:32px">Hedge Recommendations</div>
+    <div style="font-family:var(--mono);font-size:11px;color:var(--muted);
+                margin-bottom:12px;line-height:1.6">
+      Proposed forward contracts that reduce your Consolidated Portfolio VaR,
+      ranked by marginal risk impact. Each hedge is applied cumulatively —
+      the VaR shown "after" each row already reflects all previous hedges.
+    </div>
+    <div class="var-card" id="hedgeRecsCard"></div>
+  </div>
 
 
   <!-- ── BUCKETED RISK DETAIL ── -->
@@ -1989,6 +2201,10 @@ async function calculate() {
   document.getElementById('results-consolidated').style.display = 'none';
   document.getElementById('results-dashboard').style.display = 'none';
   document.getElementById('results-sensitivity').style.display = 'none';
+  // Hide any stale hedge recommendations — a new Calculate means new portfolio
+  // inputs, so the old recommendations no longer correspond to the current data.
+  document.getElementById('results-hedge').style.display = 'none';
+  document.getElementById('hedgeBtnStatus').textContent = '';
 
   try {
     const resp = await fetch('/calculate', {
@@ -2159,6 +2375,449 @@ function renderSensitivity(data) {
       Figures show the <em>change</em> in ${base_ccy} equivalent, not the new total value
     </p>`;
 }
+
+// =============================================================================
+// HEDGE RECOMMENDATIONS (V3.8)
+// =============================================================================
+//
+// Two functions:
+//   getHedgeRecommendations()      — async, POSTs to /recommend_hedges,
+//                                    called by the "Get Hedge Recommendations"
+//                                    button in the Consolidated Portfolio VaR card
+//   renderHedgeRecommendations()   — pure render, builds the table HTML from
+//                                    the /recommend_hedges JSON response
+//
+// No shared state with renderResults() or dashboard.js. These two functions
+// are completely self-contained — they read from the DOM only to find their
+// own #results-hedge and #hedgeRecsCard elements, and write to nothing outside
+// those elements.
+//
+// The portfolio inputs (currencies, amounts, dates, base_ccy, etc.) are re-read
+// from the DOM on each call to getHedgeRecommendations() — the same way
+// calculate() reads them — so the recommendations always reflect whatever is
+// currently entered in the form.
+// =============================================================================
+
+/**
+ * getHedgeRecommendations()
+ *
+ * Reads the current portfolio inputs from the DOM, POSTs them to
+ * /recommend_hedges, and calls renderHedgeRecommendations() on success.
+ *
+ * === WHY THIS IS A SEPARATE NETWORK CALL FROM CALCULATE ===
+ *
+ * /recommend_hedges runs calculate_consolidated_portfolio_var() once per hedge
+ * candidate (O(N) engine re-runs where N = number of candidates). This is
+ * more expensive than /calculate's fixed computation set, so it is gated
+ * behind an explicit button click rather than running on every Calculate.
+ *
+ * === DOM READING — MIRRORS calculate() EXACTLY ===
+ *
+ * Input rows in this app are NOT <tr> elements — they are <div class="grid-row">
+ * elements inside #cashBody and #expBody, using CSS Grid for layout (see the
+ * .cash-cols / .grid-row CSS comment near the top of this file for why).
+ * Inputs within each row are accessed by element ID, not by class selector:
+ *
+ *   Cash row:     <div class="grid-row cash-cols" id="cash-N">
+ *     Inputs:     cashCcy-N (select), cashBal-N (input)
+ *
+ *   Exposure row: <div class="grid-row exp-cols" id="exp-N">
+ *     Inputs:     expCcy-N (select), expAmt-N (input), expDate-N (input), expDir-N (select)
+ *
+ * toRawNumber() takes a DOM element — not a string — and reads .value internally.
+ * Always pass getElementById(...) directly, never pass el.value.
+ *
+ * If calculate() is ever refactored to change how inputs are read (element IDs,
+ * container IDs, etc.), this function must be updated in lockstep — both functions
+ * must always represent the same portfolio state.
+ */
+async function getHedgeRecommendations() {
+  // ── Read global settings — must use the same element IDs as calculate() ──
+  const baseCcy    = document.getElementById('baseCcy').value.trim().toUpperCase();
+  const confidence = parseFloat(document.getElementById('confidence').value);
+  const period     = document.getElementById('lookback').value;
+
+  // ── Collect cash positions from #cashBody .grid-row divs ─────────────────
+  // Each row has id="cash-N"; its inputs have ids cashCcy-N and cashBal-N.
+  // toRawNumber() expects the DOM element — NOT .value — and strips commas internally.
+  const cashPositions = [];
+  for (const row of document.getElementById('cashBody').querySelectorAll('.grid-row')) {
+    const id  = row.id.replace('cash-', '');
+    const ccy = document.getElementById(`cashCcy-${id}`)?.value?.trim().toUpperCase();
+    const bal = toRawNumber(document.getElementById(`cashBal-${id}`));
+    if (!ccy || isNaN(bal) || bal <= 0) continue;
+    if (ccy === baseCcy) continue;   // home currency — no FX risk
+    cashPositions.push({ currency: ccy, balance: bal });
+  }
+
+  // ── Collect forward exposures from #expBody .grid-row divs ───────────────
+  // Each row has id="exp-N"; its inputs have ids expCcy-N, expAmt-N,
+  // expDate-N, expDir-N. Same toRawNumber rule: pass the element, not .value.
+  const exposures = [];
+  for (const row of document.getElementById('expBody').querySelectorAll('.grid-row')) {
+    const id  = row.id.replace('exp-', '');
+    const ccy = document.getElementById(`expCcy-${id}`)?.value?.trim().toUpperCase();
+    const amt = toRawNumber(document.getElementById(`expAmt-${id}`));
+    const dt  = document.getElementById(`expDate-${id}`)?.value;
+    const dir = document.getElementById(`expDir-${id}`)?.value;
+    if (!ccy || isNaN(amt) || amt <= 0 || !dt) continue;
+    if (ccy === baseCcy) continue;
+    exposures.push({ currency: ccy, amount: amt, settlement_date: dt, direction: dir });
+  }
+
+  if (!cashPositions.length && !exposures.length) {
+    document.getElementById('hedgeBtnStatus').textContent =
+      'No positions found — please run Calculate first.';
+    return;
+  }
+
+  // ── UI state: loading ─────────────────────────────────────────────────────
+  const btn    = document.getElementById('hedgeBtn');
+  const status = document.getElementById('hedgeBtnStatus');
+  btn.disabled       = true;
+  status.textContent = 'Computing hedge recommendations…';
+  status.style.color = 'var(--muted)';
+  document.getElementById('results-hedge').style.display = 'none';
+
+  // ── Network call to /recommend_hedges ─────────────────────────────────────
+  // Note: cash_horizon is intentionally NOT sent — /recommend_hedges always
+  // uses CASH_CONSOLIDATED_T_DAYS (10 trading days) for cash, matching the
+  // Consolidated Portfolio VaR treatment throughout the rest of the app.
+  try {
+    const resp = await fetch('/recommend_hedges', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        base_currency:  baseCcy,
+        confidence,
+        period,
+        cash_positions: cashPositions,
+        exposures,
+      }),
+    });
+
+    const result = await resp.json();
+    if (!resp.ok || result.error) throw new Error(result.error || `HTTP ${resp.status}`);
+
+    renderHedgeRecommendations(result);
+    status.textContent = '';
+
+  } catch (err) {
+    status.textContent = `Error: ${err.message}`;
+    status.style.color = 'var(--danger)';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+
+/**
+ * renderHedgeRecommendations(data)
+ *
+ * Renders the ranked hedge recommendation table into #hedgeRecsCard.
+ *
+ * === WHAT IS DISPLAYED ===
+ *
+ * 1. A summary line: baseline VaR → fully-hedged VaR with total % reduction.
+ * 2. A ranked table — one row per (currency, bucket) candidate — showing:
+ *      - Proposed forward contract (currency, direction, size, settlement)
+ *      - Portfolio VaR before and after this hedge (cumulative — includes
+ *        all prior hedges already applied)
+ *      - Marginal reduction: THIS hedge's own impact
+ *      - Cumulative reduction: total from baseline to this point
+ * 3. A plain-language disclaimer — mandatory, because these are illustrative
+ *    suggestions, not automatically executable instructions.
+ *
+ * === TABLE DESIGN CHOICES ===
+ *
+ * - "Proposed Forward" column shows direction in plain English ("Buy FCY" /
+ *   "Sell FCY") rather than "payable"/"receivable", which is how a treasurer
+ *   would think about the transaction from their bank's perspective.
+ * - VaR figures use the full fmt() formatting (thousands separators) for
+ *   readability at realistic portfolio sizes.
+ * - Marginal reduction uses fmtShort() (K/M abbreviations) because
+ *   individual-hedge reductions on a small portfolio can be hundreds of units,
+ *   while on a large portfolio they can be millions — compact format works
+ *   at both scales without overflowing the column.
+ * - Background of each row shades from lighter (rank 1, highest impact) to
+ *   darker (last rank, diminishing returns) to make the "do this first"
+ *   message visually obvious.
+ *
+ * === NO FORWARD RECOMMENDATIONS FOR CASH ===
+ *
+ * Cash holdings are not shown as hedge candidates because they are physical
+ * assets the company already holds — no forward contract is needed. The engine
+ * already accounts for cash's natural offset in the Portfolio VaR figure.
+ * This is explained in the disclaimer rendered below the table.
+ *
+ * @param {Object} data - Full /recommend_hedges JSON response
+ */
+function renderHedgeRecommendations(data) {
+  const { base_ccy, baseline_var, recommendations,
+          fully_hedged_var, fully_hedged_reduction_pct, errors } = data;
+
+  const card    = document.getElementById('hedgeRecsCard');
+  const section = document.getElementById('results-hedge');
+
+  // ── No-hedges case ────────────────────────────────────────────────────────
+  if (!recommendations || recommendations.length === 0) {
+    card.innerHTML = `
+      <p style="font-family:var(--mono);font-size:12px;color:var(--muted);margin:0">
+        No hedgeable forward exposures found. If you have only cash positions,
+        there are no forward contracts to recommend — cash holdings are liquid
+        assets that do not require a forward hedge.
+      </p>`;
+    section.style.display = 'block';
+    return;
+  }
+
+  // ── Summary strip ─────────────────────────────────────────────────────────
+  // Shows the headline before/after at a glance, above the detail table.
+  // If the last hedge(s) are counterproductive (marginal < 0), the "fully
+  // hedged" VaR is NOT the minimum — the optimal stopping point is the last
+  // row with a positive marginal reduction. We surface this explicitly so
+  // the treasurer isn't misled into thinking they should execute all contracts.
+  const totalReductionAbs = baseline_var - fully_hedged_var;
+
+  // Find the optimal stopping point: the row with the lowest portfolio_var_after.
+  // This equals the last row with positive marginal reduction — but we compute it
+  // directly from the data rather than assuming the last positive-marginal row,
+  // in case a future engine version produces non-monotone behaviour for other
+  // reasons.
+  const optimalRec    = recommendations.reduce((best, r) =>
+    r.portfolio_var_after < best.portfolio_var_after ? r : best,
+    recommendations[0]
+  );
+  const hasCounterproductive = recommendations.some(r => r.marginal_reduction_abs < 0);
+  const optimalVar    = optimalRec.portfolio_var_after;
+  const optimalReduction = baseline_var - optimalVar;
+  const optimalPct    = (optimalReduction / baseline_var * 100).toFixed(1);
+
+  // Fully hedged strip — use optimal VaR if different from fully_hedged_var
+  const displayVar    = hasCounterproductive ? optimalVar    : fully_hedged_var;
+  const displayPct    = hasCounterproductive ? optimalPct    : fully_hedged_reduction_pct.toFixed(1);
+  const displayAbs    = hasCounterproductive ? optimalReduction : totalReductionAbs;
+  const displayLabel  = hasCounterproductive
+    ? `Optimal Hedged VaR <span style="font-size:10px;color:var(--muted)">(stop at rank ${optimalRec.rank})</span>`
+    : 'Fully Hedged VaR';
+
+  const summaryHTML = `
+    <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:20px;
+                padding-bottom:16px;border-bottom:1px solid var(--border)">
+      <div>
+        <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+                    text-transform:uppercase;letter-spacing:0.08em">
+          Baseline Portfolio VaR
+        </div>
+        <div style="font-family:var(--mono);font-size:20px;color:var(--fg);
+                    font-weight:500;margin-top:2px">
+          ${base_ccy} ${fmt(baseline_var)}
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;color:var(--muted);
+                  font-size:18px;padding-top:16px">→</div>
+      <div>
+        <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+                    text-transform:uppercase;letter-spacing:0.08em">
+          ${displayLabel}
+        </div>
+        <div style="font-family:var(--mono);font-size:20px;color:var(--accent);
+                    font-weight:500;margin-top:2px">
+          ${base_ccy} ${fmt(displayVar)}
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;padding-top:16px">
+        <div style="background:rgba(74,222,128,0.08);border:1px solid var(--accent);
+                    border-radius:6px;padding:6px 12px;font-family:var(--mono);
+                    font-size:12px;color:var(--accent)">
+          ↓ ${base_ccy} ${fmtShort(displayAbs)} &nbsp;·&nbsp;
+          ${displayPct}% reduction
+        </div>
+      </div>
+      ${hasCounterproductive ? `
+      <div style="display:flex;align-items:center;padding-top:16px">
+        <div style="background:rgba(251,191,36,0.08);border:1px solid #fbbf24;
+                    border-radius:6px;padding:6px 12px;font-family:var(--mono);
+                    font-size:11px;color:#fbbf24">
+          ⚠ ${recommendations.filter(r => r.marginal_reduction_abs < 0).length}
+          hedge(s) below add risk — do not execute (amber rows)
+        </div>
+      </div>` : ''}
+    </div>`;
+
+  // ── Ranked table ──────────────────────────────────────────────────────────
+  // One row per recommendation; rows are already sorted by rank from the engine.
+  const headerRow = `
+    <tr>
+      <th class="hrec-th">Rank</th>
+      <th class="hrec-th">Currency / Bucket</th>
+      <th class="hrec-th">Proposed Forward</th>
+      <th class="hrec-th">Settlement</th>
+      <th class="hrec-th">Portfolio VaR After</th>
+      <th class="hrec-th hrec-th-right">Marginal ↓</th>
+      <th class="hrec-th hrec-th-right">Cumulative ↓</th>
+    </tr>`;
+
+  const bodyRows = recommendations.map((rec, i) => {
+    // ── Row background ─────────────────────────────────────────────────────
+    // Negative-marginal rows (hedge increases VaR) get an amber tint instead
+    // of the standard graduated opacity. This makes them immediately visually
+    // distinct from the rows above without needing the user to read the number.
+    // Standard rows shade from lighter (rank 1, highest impact) to darker (last)
+    // to reinforce the "do this first, each subsequent adds less" message.
+    const isCounterproductive = rec.marginal_reduction_abs < 0;
+    const rowOpacity = 1 - (i / recommendations.length) * 0.5;
+    const rowBg = isCounterproductive
+      ? 'rgba(251,191,36,0.05)'     // amber tint — signals caution, not error
+      : `rgba(255,255,255,${(0.03 * rowOpacity).toFixed(3)})`;
+
+    // ── Direction label ────────────────────────────────────────────────────
+    // Plain-English direction from the treasurer's perspective:
+    //   hedge_direction = 'payable'    → proposed forward is a payable
+    //                                  = we SELL FCY (receive base ccy)
+    //                                  = hedges a net RECEIVABLE exposure
+    //                                  → label: "Sell CCY fwd"
+    //   hedge_direction = 'receivable' → proposed forward is a receivable
+    //                                  = we BUY FCY (pay base ccy)
+    //                                  = hedges a net PAYABLE exposure
+    //                                  → label: "Buy CCY fwd"
+    const hedgeLabel = rec.hedge_direction === 'payable'
+      ? `Sell ${rec.currency} fwd`
+      : `Buy ${rec.currency} fwd`;
+
+    // Format notional: FCY amount + SGD-equivalent for quick comparison
+    const notionalFCY  = `${rec.currency} ${fmtC(rec.hedge_amount_fcy)}`;
+    const notionalBase = `≈ ${base_ccy} ${fmtShort(Math.abs(rec.net_notional_base))}`;
+
+    // ── Marginal reduction display ─────────────────────────────────────────
+    // Negative marginal = this hedge increases portfolio VaR in the context of
+    // all previously applied hedges. This is NOT a data error — it is a genuine
+    // covariance effect: by the time the engine reaches this candidate, the
+    // portfolio structure has changed enough that this position was actually
+    // providing a small natural diversification benefit to the remaining
+    // unhedged positions. Hedging it out removes that benefit.
+    //
+    // Visual treatment: amber colour + "⚠ adds risk" label to make it
+    // unmissable. The treasurer should stop at the row above this one.
+    //
+    // Technical note: Component CFaR used for ranking is computed on the
+    // ORIGINAL (unhedged) portfolio. By the time this candidate is evaluated,
+    // earlier hedges have already changed the covariance structure — so the
+    // original ranking signal is no longer accurate for this position.
+    // This is a known limitation of the greedy sequential algorithm and is
+    // documented in README > Known Limitations.
+    const margAbsDisplay = isCounterproductive
+      ? `<span class="hrec-warn-val">+ ${base_ccy} ${fmtShort(Math.abs(rec.marginal_reduction_abs))}</span>`
+      : `<span class="hrec-reduction">${base_ccy} ${fmtShort(rec.marginal_reduction_abs)}</span>`;
+
+    const margPctDisplay = isCounterproductive
+      ? `<span class="hrec-warn-label">⚠ adds risk</span>`
+      : `<span class="hrec-sub">${rec.marginal_reduction_pct.toFixed(1)}%</span>`;
+
+    // Rank badge: standard number for normal rows, amber warning triangle for
+    // counterproductive rows — makes the issue visible at a glance even when
+    // the user is scanning the left column rather than reading every number.
+    const rankDisplay = isCounterproductive
+      ? `<span class="hrec-rank-warn">⚠</span>`
+      : rec.rank;
+
+    return `
+      <tr style="background:${rowBg}">
+        <td class="hrec-td hrec-rank">${rankDisplay}</td>
+        <td class="hrec-td">
+          <span class="hrec-ccy">${rec.currency}</span>
+          <span class="hrec-bucket">B${rec.bucket_num} · ${rec.bucket_label}</span>
+          <span class="hrec-sub">Component CFaR: ${base_ccy} ${fmtShort(Math.abs(rec.component_cfar_baseline))}</span>
+        </td>
+        <td class="hrec-td">
+          <span class="hrec-action">${hedgeLabel}</span>
+          <span class="hrec-sub">${notionalFCY}</span>
+          <span class="hrec-sub">${notionalBase}</span>
+        </td>
+        <td class="hrec-td">
+          <span class="hrec-date">${rec.hedge_settlement_date}</span>
+          <span class="hrec-sub">T = ${rec.hedge_settlement_t} trading days</span>
+        </td>
+        <td class="hrec-td">
+          <span class="hrec-var-after">${base_ccy} ${fmt(rec.portfolio_var_after)}</span>
+          <span class="hrec-sub">(was ${base_ccy} ${fmt(rec.portfolio_var_before)})</span>
+        </td>
+        <td class="hrec-td hrec-td-right">
+          ${margAbsDisplay}
+          ${margPctDisplay}
+        </td>
+        <td class="hrec-td hrec-td-right">
+          <span class="hrec-reduction">${base_ccy} ${fmtShort(rec.cumulative_reduction_abs)}</span>
+          <span class="hrec-sub">${rec.cumulative_reduction_pct.toFixed(1)}%</span>
+        </td>
+      </tr>`;
+  }).join('');
+
+  // ── Errors (market data fetch failures) ───────────────────────────────────
+  const errHTML = errors?.length
+    ? `<div class="fetch-errors" style="margin-top:12px">
+         ⚠ Could not fetch data for: ${errors.map(e => e.currency).join(', ')} —
+         these currencies are excluded from recommendations.
+       </div>`
+    : '';
+
+  // ── Disclaimer ────────────────────────────────────────────────────────────
+  // Mandatory: recommendations are illustrative, not executable.
+  // Bullets kept minimal and factual — removed generic "consult your bank"
+  // and "verify the exposure exists" bullets which are self-evident to any
+  // practicing treasurer. What remains are the three PoC-specific technical
+  // simplifications that a treasurer would NOT know about unless told:
+  //   1. Forward rate ≈ spot rate (interest rate parity not modelled)
+  //   2. Settlement dates are bucket midpoint T, not exposure-weighted average T
+  //   3. Cash positions are excluded from recommendations by design
+  const disclaimerHTML = `
+    <div style="margin-top:20px;padding:12px 16px;
+                border:1px solid rgba(255,255,255,0.08);border-radius:6px;
+                background:rgba(255,255,255,0.02)">
+      <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+                  text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px">
+        PoC Simplifications
+      </div>
+      <ul style="font-family:var(--mono);font-size:11px;color:var(--muted);
+                 line-height:1.7;margin:0;padding-left:16px">
+        <li><strong style="color:var(--fg)">Forward rate ≈ spot rate.</strong>
+            Real forward rates include an interest rate differential (covered interest
+            rate parity: F = S × (1 + r_base × T) / (1 + r_foreign × T)). The gap is
+            small at short tenors on stable pairs but material for long-dated or
+            high-rate-differential currencies. Re-quote with your bank for the exact
+            forward rate before executing.</li>
+        <li><strong style="color:var(--fg)">Settlement dates use bucket midpoint T.</strong>
+            Each proposed forward is dated to the midpoint of its bucket (e.g. 42 trading
+            days for Bucket 2, 95 days for Bucket 3) — the same horizon the engine uses
+            for all bucket-level attribution. This is a deliberate simplification: the
+            theoretically optimal date would be the exposure-weighted average of the exact
+            settlement dates within the bucket, but the difference is small and the bucket
+            midpoint keeps the recommendation interpretable. When executing with your bank,
+            use the actual settlement date of your underlying exposure to minimise the
+            residual T-mismatch risk that this engine already captures and reports.</li>
+        <li><strong style="color:var(--fg)">Cash positions excluded.</strong>
+            No forward contracts are proposed for cash holdings — cash is a liquid asset
+            you already hold and does not need a forward to hedge it. Its natural offset
+            against forward obligations is already captured in the Portfolio VaR figures.</li>
+      </ul>
+    </div>`;
+
+  // ── Assemble and inject ───────────────────────────────────────────────────
+  card.innerHTML = `
+    ${summaryHTML}
+    <div class="hrec-table-wrap">
+      <table class="hrec-table">
+        <thead>${headerRow}</thead>
+        <tbody>${bodyRows}</tbody>
+      </table>
+    </div>
+    ${errHTML}
+    ${disclaimerHTML}`;
+
+  section.style.display = 'block';
+  section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 
 // =============================================================================
 // RENDER RESULTS
