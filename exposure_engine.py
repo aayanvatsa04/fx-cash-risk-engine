@@ -2092,7 +2092,8 @@ def calculate_fx_var(
         [pos['currency'] for pos in cash_positions] +
         [exp['currency'] for exp in exposures]
     )
-    print(f"  Fetching market data for {len(set(c.upper() for c in all_currencies if c.upper() != base_ccy.upper()))} unique currency pairs…")
+    n_pairs = len(set(c.upper() for c in all_currencies if c.upper() != base_ccy.upper()))
+    print(f"  [1/6] fetching market data — {n_pairs} currency pair(s)…")
     market_data = fetch_market_data_batch(all_currencies, base_ccy, period)
 
     # -----------------------------------------------------------------------
@@ -2100,7 +2101,7 @@ def calculate_fx_var(
     # Uses V1 calculate_portfolio_var for individual breakdowns,
     # then augments with covariance-adjusted total (V2.2).
     # -----------------------------------------------------------------------
-    print("  Section 1 — spot book VaR (standalone, T={})…".format(cash_horizon))
+    print(f"  [2/6] cash book risk — spot VaR (T={cash_horizon} trading day(s))…")
     spot_result = calculate_portfolio_var(
         positions        = cash_positions,
         base_ccy         = base_ccy,
@@ -2116,7 +2117,7 @@ def calculate_fx_var(
     # = 1 trading day from today → always falls in Bucket 1: 0–21 days).
     # Combine with actual forward exposures and run bucket netting + covariance.
     # -----------------------------------------------------------------------
-    print("  Section 2 — unified bucketed VaR (cash in Bucket 1 + forwards)…")
+    print("  [3/6] bucketed risk detail — cash in Bucket 1 + forwards (netting + covariance)…")
     settle_bucket1 = trading_days_to_date(1)
 
     cash_as_receivables = [
@@ -2145,7 +2146,7 @@ def calculate_fx_var(
     # Cash positions are NOT included here — this is a reference view of
     # forward exposures before any netting is applied.
     # -----------------------------------------------------------------------
-    print("  Section 3 — gross attribution (forwards only, no netting)…")
+    print("  [4/6] gross attribution — forwards only, no netting (internal reference)…")
     _, gross_exposures, gross_errors = calculate_gross_forward_var(
         exposures    = exposures,
         base_ccy     = base_ccy,
@@ -2161,8 +2162,8 @@ def calculate_fx_var(
     # from the Cash VaR Horizon dropdown, which affects only Section 1
     # (Cash Book Risk) above. See calculate_gross_cash_var's docstring.
     # -----------------------------------------------------------------------
-    print("  Gross cash attribution (fixed T={} — independent of cash_horizon)…".format(
-        CASH_CONSOLIDATED_T_DAYS))
+    print(f"  [4b/6] gross cash attribution — fixed T={CASH_CONSOLIDATED_T_DAYS}d"
+          f" (independent of cash_horizon, feeds Gross Standalone Risk stat card)…")
     _, gross_cash_exposures, gross_cash_errors = calculate_gross_cash_var(
         cash_positions = cash_positions,
         base_ccy       = base_ccy,
@@ -2189,7 +2190,7 @@ def calculate_fx_var(
     #
     # See calculate_consolidated_portfolio_var for full methodology details.
     # -----------------------------------------------------------------------
-    print("  Step 5 — consolidated portfolio VaR (V2.4 mixed-T covariance)…")
+    print("  [5/6] consolidated portfolio VaR — exact min(Tᵢ,Tⱼ) covariance, all positions…")
     consolidated_var = calculate_consolidated_portfolio_var(
         cash_positions = cash_positions,
         exposures      = exposures,
@@ -2210,7 +2211,7 @@ def calculate_fx_var(
     # as Step 5 above — every Dashboard period view (including the Component
     # CFaR bars) is unaffected by the Cash VaR Horizon dropdown.
     # -----------------------------------------------------------------------
-    print("  Step 6 — cumulative period VaRs (V3 dashboard filter)…")
+    print("  [6/6] cumulative period VaRs + Component CFaR — 1m/3m/6m/12m/all (dashboard filter)…")
     cumulative_vars = calculate_cumulative_period_vars(
         cash_positions = cash_positions,
         exposures      = exposures,
@@ -2586,11 +2587,12 @@ def recommend_hedges(
     # Step 1: Fetch market data once — reused for every VaR re-computation.
     # Same batch approach as calculate_fx_var; results cached in market_data dict.
     # -------------------------------------------------------------------------
-    print("recommend_hedges: fetching market data…")
-    all_ccys   = (
+    all_ccys = (
         [p['currency'] for p in cash_positions] +
         [e['currency'] for e in exposures]
     )
+    n_pairs = len(set(c.upper() for c in all_ccys if c.upper() != base_ccy.upper()))
+    print(f"  recommend_hedges [1/4] fetching market data — {n_pairs} currency pair(s)…")
     market_data = fetch_market_data_batch(all_ccys, base_ccy, period)
 
     # Collect any fetch errors for the response (currencies that will be skipped)
@@ -2605,7 +2607,7 @@ def recommend_hedges(
     # This is the "before any hedges" figure — the starting point for all
     # reduction calculations below.
     # -------------------------------------------------------------------------
-    print("recommend_hedges: computing baseline consolidated VaR…")
+    print("  recommend_hedges [2/4] baseline consolidated portfolio VaR…")
     baseline_result = calculate_consolidated_portfolio_var(
         cash_positions = cash_positions,
         exposures      = exposures,
@@ -2626,7 +2628,7 @@ def recommend_hedges(
     # that diversifies against another will have lower Component CFaR than
     # a smaller-notional currency that is the primary risk driver.
     # -------------------------------------------------------------------------
-    print("recommend_hedges: computing baseline Component CFaRs for ranking…")
+    print("  recommend_hedges [3/4] baseline Component CFaRs for ranking…")
     baseline_cumulative = calculate_cumulative_period_vars(
         cash_positions = cash_positions,
         exposures      = exposures,
@@ -2697,7 +2699,7 @@ def recommend_hedges(
     # reads it (see _build_individual_positions_list — it only uses the four
     # fields above). It is safe to include in the list without affecting math.
     # -------------------------------------------------------------------------
-    print(f"recommend_hedges: evaluating {len(candidates)} candidate hedge(s)…")
+    print(f"  recommend_hedges [4/4] evaluating {len(candidates)} candidate hedge(s) cumulatively…")
     running_exposures = list(exposures)   # copy — never modify caller's list
     running_var       = baseline_var
     recommendations   = []
@@ -2772,7 +2774,7 @@ def recommend_hedges(
         if baseline_var > 1e-9 else 0.0
     )
 
-    print(f"recommend_hedges: complete. Baseline {baseline_var:.2f} → "
+    print(f"  recommend_hedges done — baseline {baseline_var:.2f} → "
           f"fully hedged {fully_hedged_var:.2f} ({fully_hedged_pct:.1f}% reduction).")
 
     return {
